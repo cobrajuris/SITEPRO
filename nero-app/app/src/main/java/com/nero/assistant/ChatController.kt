@@ -4,20 +4,20 @@ import android.os.Handler
 import android.os.Looper
 import com.nero.assistant.data.ChatStore
 import com.nero.assistant.data.ChatTurn
-import com.nero.assistant.data.ClaudeService
 import com.nero.assistant.data.Conversation
+import com.nero.assistant.data.GroqService
 import com.nero.assistant.data.NeroException
 import com.nero.assistant.data.Role
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Estado e regras do chat. A tela observa via [onChange]; tudo aqui roda na thread principal,
- * exceto a chamada ao Claude, que vai para uma thread de fundo.
+ * exceto a chamada à Groq, que vai para uma thread de fundo.
  */
 class ChatController(private val store: ChatStore) {
 
     private val main = Handler(Looper.getMainLooper())
-    private var service: ClaudeService? = null
+    private var service: GroqService? = null
     private var serviceKey: String? = null
     private var cancelFlag = AtomicBoolean(false)
 
@@ -170,9 +170,9 @@ class ChatController(private val store: ChatStore) {
         store.saveConversations(conversations)
     }
 
-    private fun serviceFor(key: String): ClaudeService {
+    private fun serviceFor(key: String): GroqService {
         if (service == null || serviceKey != key) {
-            service = ClaudeService(key)
+            service = GroqService(key)
             serviceKey = key
         }
         return service!!

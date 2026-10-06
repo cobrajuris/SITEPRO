@@ -302,14 +302,14 @@ class MainActivity : Activity() {
         val nameField = field("Como o Nero deve te chamar")
         body.addView(card("Seu nome", nameField))
 
-        val keyField = field("sk-ant-...").apply {
+        val keyField = field("gsk_...").apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             transformationMethod = PasswordTransformationMethod.getInstance()
         }
         body.addView(card(
-            "Chave de API da Anthropic",
+            "Chave de API da Groq",
             keyField,
-            text("Crie a sua em console.anthropic.com. Ela fica salva só neste aparelho.", 13f, C.MUTED)
+            text("Crie a sua grátis em console.groq.com/keys. Ela fica salva só neste aparelho.", 13f, C.MUTED)
                 .apply { setPadding(0, dp(8), 0, 0) },
         ))
 
@@ -342,7 +342,7 @@ class MainActivity : Activity() {
             showSettings(false)
         }, LinearLayout.LayoutParams(MATCH, dp(52)).apply { topMargin = dp(8) })
 
-        body.addView(text("Nero 1.0 · feito com Claude", 12f, C.MUTED).apply {
+        body.addView(text("Nero 1.1 · movido pela Groq", 12f, C.MUTED).apply {
             gravity = Gravity.CENTER
             setPadding(0, dp(28), 0, 0)
         }, LinearLayout.LayoutParams(MATCH, WRAP))
@@ -474,7 +474,7 @@ class MainActivity : Activity() {
                 setPadding(dp(18), dp(18), dp(18), dp(18))
                 setOnClickListener { showSettings(true) }
                 addView(text("Ative o Nero", 16f, C.GOLD, bold = true))
-                addView(text("Toque aqui e cole sua chave de API da Anthropic para começar.", 14f, C.EYE)
+                addView(text("Toque aqui e cole sua chave de API da Groq para começar.", 14f, C.EYE)
                     .apply { setPadding(0, dp(4), 0, 0) })
             }
             addView(activate, LinearLayout.LayoutParams(MATCH, WRAP))
