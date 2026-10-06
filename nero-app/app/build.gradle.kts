@@ -11,8 +11,8 @@ android {
         applicationId = "com.nero.assistant"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 3
+        versionName = "1.2.0"
     }
 
     buildTypes {
@@ -43,5 +43,5 @@ android {
 }
 
 dependencies {
-    // Nenhuma biblioteca extra: a interface usa componentes nativos e a Groq é chamada via HTTP.
+    // Nenhuma biblioteca extra: a interface usa componentes nativos e o OpenRouter é chamado via HTTP.
 }

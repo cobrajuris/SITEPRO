@@ -26,6 +26,10 @@ class ChatStore(context: Context) {
         get() = prefs.getBoolean(KEY_DEEP, false)
         set(value) = prefs.edit().putBoolean(KEY_DEEP, value).apply()
 
+    var model: String
+        get() = prefs.getString(KEY_MODEL, null) ?: OpenRouterService.FREE_MODEL
+        set(value) = prefs.edit().putString(KEY_MODEL, value.trim()).apply()
+
     var userName: String
         get() = prefs.getString(KEY_NAME, "").orEmpty()
         set(value) = prefs.edit().putString(KEY_NAME, value.trim()).apply()
@@ -72,6 +76,7 @@ class ChatStore(context: Context) {
         const val KEY_API = "api_key"
         const val KEY_DEEP = "deep_mode"
         const val KEY_NAME = "user_name"
+        const val KEY_MODEL = "model"
         const val KEY_CONVERSATIONS = "conversations"
     }
 }
