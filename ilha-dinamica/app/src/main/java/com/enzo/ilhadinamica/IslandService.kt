@@ -37,6 +37,7 @@ import android.provider.Settings
 import android.util.Log
 import android.view.Display
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
@@ -75,6 +76,8 @@ class IslandService : Service() {
         const val EXTRA_C = "c"
         private const val CHANNEL = "ilha"
         private const val NOTIF_ID = 26
+        private const val CAP_W = 340f
+        private const val CAP_H = 92f
 
         @Volatile
         var instance: IslandService? = null
@@ -106,6 +109,8 @@ class IslandService : Service() {
     private var root: FrameLayout? = null
     private var web: WebView? = null
     private var lp: WindowManager.LayoutParams? = null
+    private var bubble: BubbleView? = null
+    private var bubbleLp: WindowManager.LayoutParams? = null
     private var pageReady = false
     private val pending = ArrayList<String>()
     private var islandOpen = false
@@ -212,7 +217,13 @@ class IslandService : Service() {
         }.onFailure { Log.e(TAG, "startForeground falhou", it) }
     }
 
-    // ---------------------------------------------------------------- janela flutuante
+    // ---------------------------------------------------------------- janelas flutuantes
+    //
+    // Duas camadas:
+    //  1) bolha — View nativa pequena, fixa em volta da câmera (sempre tocável);
+    //  2) cápsula — WebView com tamanho FIXO, posicionada dentro da tela. Fechada, fica
+    //     totalmente transparente (alpha 0) e não-tocável, então nunca bloqueia toques nos
+    //     apps de baixo (regra do Android 12+) e nunca precisa ser redimensionada (sem tremidas).
 
     private fun overlayContext(): Context {
         if (Build.VERSION.SDK_INT >= 30) {
@@ -225,19 +236,41 @@ class IslandService : Service() {
         return this
     }
 
+    private fun baseParams(touchable: Boolean): WindowManager.LayoutParams {
+        var flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
+        if (!touchable) flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        val p = WindowManager.LayoutParams(
+            1, 1, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, flags, PixelFormat.TRANSLUCENT
+        )
+        p.gravity = Gravity.TOP or Gravity.START
+        if (Build.VERSION.SDK_INT >= 28) {
+            p.layoutInDisplayCutoutMode = if (Build.VERSION.SDK_INT >= 30)
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            else WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+        p.windowAnimations = 0
+        return p
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     private fun createOverlay() {
         if (root != null) return
         pageReady = false
+        islandOpen = false
+        locateCamera()
+        computeGeometry()
+
+        // ----- cápsula (WebView) -----
         val w = WebView(ui)
         w.setBackgroundColor(Color.TRANSPARENT)
         w.isVerticalScrollBarEnabled = false
         w.isHorizontalScrollBarEnabled = false
         w.overScrollMode = View.OVER_SCROLL_NEVER
-        w.isHapticFeedbackEnabled = true
         w.settings.javaScriptEnabled = true
         w.settings.domStorageEnabled = true
-        w.settings.allowFileAccess = false
         w.settings.allowContentAccess = false
         w.settings.textZoom = 100
         w.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
@@ -258,7 +291,6 @@ class IslandService : Service() {
                 return true
             }
         }
-
         val frame = object : FrameLayout(ui) {
             override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
                 if (ev.actionMasked == MotionEvent.ACTION_OUTSIDE) {
@@ -269,45 +301,46 @@ class IslandService : Service() {
             }
         }
         frame.addView(w, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
-
-        val params = WindowManager.LayoutParams(
-            dp(46f), dp(48f),
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
-            PixelFormat.TRANSLUCENT
-        )
-        params.gravity = Gravity.TOP or Gravity.START
-        if (Build.VERSION.SDK_INT >= 28) {
-            params.layoutInDisplayCutoutMode = if (Build.VERSION.SDK_INT >= 30)
-                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
-            else WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-        }
-        params.title = "Ilha dinâmica"
-        params.windowAnimations = 0
-
-        locateCamera()
-        params.x = (camX - params.width / 2f).roundToInt()
-        params.y = 0
+        val params = baseParams(false)
+        params.flags = params.flags or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+        params.title = "Ilha dinâmica — cápsula"
+        params.alpha = 0f
+        applyCapsuleGeometry(params)
         wm.addView(frame, params)
         root = frame
         web = w
         lp = params
-        frame.visibility = if (landscape) View.GONE else View.VISIBLE
+
+        // ----- bolha (nativa), por cima da cápsula -----
+        val b = BubbleView(ui) {
+            js(JSONObject().put("type", if (islandOpen) "close" else "open"))
+        }
+        b.bubbleScale = bubbleScale
+        b.contentDescription = "Ilha dinâmica"
+        val bp = baseParams(true)
+        bp.title = "Ilha dinâmica — bolha"
+        applyBubbleGeometry(bp)
+        wm.addView(b, bp)
+        bubble = b
+        bubbleLp = bp
+
+        applyVisibility()
         w.loadUrl("file:///android_asset/island.html")
     }
 
     private fun destroyOverlay() {
         pageReady = false
+        islandOpen = false
         val r = root
         val w = web
+        val b = bubble
         root = null
         web = null
         lp = null
+        bubble = null
+        bubbleLp = null
+        if (b != null) runCatching { wm.removeViewImmediate(b) }
         if (r != null) runCatching { wm.removeViewImmediate(r) }
         if (w != null) runCatching {
             w.removeJavascriptInterface("IslandHost")
@@ -342,8 +375,11 @@ class IslandService : Service() {
             if (root == null) return@postDelayed
             runCatching {
                 locateCamera()
+                computeGeometry()
+                lp?.let { applyCapsuleGeometry(it); root?.let { r -> wm.updateViewLayout(r, it) } }
+                bubbleLp?.let { applyBubbleGeometry(it); bubble?.let { b -> b.bubbleScale = bubbleScale; wm.updateViewLayout(b, it) } }
+                applyVisibility()
                 pushConfig()
-                lp?.let { applySize(it.width, it.height) }
             }
         }, delayMs)
     }
@@ -351,12 +387,12 @@ class IslandService : Service() {
     /** Descobre o centro do furo da câmera (display cutout); sem furo, usa o topo central. */
     private fun locateCamera() {
         val dm = ui.resources.displayMetrics
-        var screenW = dm.widthPixels.toFloat()
+        screenWpx = dm.widthPixels.toFloat()
         var cutout: android.view.DisplayCutout? = null
         runCatching {
             if (Build.VERSION.SDK_INT >= 30) {
                 val m = wm.currentWindowMetrics
-                screenW = m.bounds.width().toFloat()
+                screenWpx = m.bounds.width().toFloat()
                 cutout = m.windowInsets.displayCutout
             } else if (Build.VERSION.SDK_INT >= 29) {
                 @Suppress("DEPRECATION")
@@ -364,18 +400,63 @@ class IslandService : Service() {
             }
         }
         landscape = ui.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-        val rect: Rect? = cutout?.boundingRects?.firstOrNull { it.top <= 0 && it.width() < screenW * 0.6f && !it.isEmpty }
+        val rect: Rect? = cutout?.boundingRects?.firstOrNull { it.top <= 0 && it.width() < screenWpx * 0.6f && !it.isEmpty }
         if (rect != null) {
             camX = rect.exactCenterX()
             camY = rect.exactCenterY()
             cutoutDp = min(rect.width(), rect.height()) / dm.density
         } else {
-            camX = screenW / 2f
+            camX = screenWpx / 2f
             camY = statusBarHeight() / 2f
             cutoutDp = 20f
         }
         camX += prefs.offsetX * dm.density
         camY += prefs.offsetY * dm.density
+    }
+
+    // Geometria (dp): igual à usada pelo JavaScript para desenhar.
+    private var screenWpx = 0f
+    private var bubbleScale = 1f
+    private var zoom = 1f
+    private var winXdp = 0f
+    private var winWdp = 0f
+    private var winHdp = 0f
+    private var capTopDp = 0f
+    private var capCxDp = 0f
+
+    private fun computeGeometry() {
+        val d = ui.resources.displayMetrics.density
+        val wDp = screenWpx / d
+        val cx = camX / d
+        val cy = camY / d
+        // A bolha tem 34 dp em volta de uma câmera de ~20 dp.
+        bubbleScale = ((cutoutDp / 20f).coerceIn(0.85f, 1.6f) * prefs.bubbleScale).coerceIn(0.6f, 2.4f)
+        zoom = min(prefs.scale, (wDp - 20f) / CAP_W).coerceIn(0.5f, 1.2f)
+        val capW = CAP_W * zoom
+        winWdp = min(wDp, capW + 56f)
+        winXdp = (cx - winWdp / 2f).coerceIn(0f, (wDp - winWdp).coerceAtLeast(0f))
+        capTopDp = cy + 17f * bubbleScale + 9f
+        winHdp = capTopDp + CAP_H * zoom + 200f
+        // A cápsula fica sob a câmera, mas sempre inteira dentro da tela.
+        val lo = capW / 2f + 10f
+        val hi = wDp - capW / 2f - 10f
+        capCxDp = (if (lo <= hi) cx.coerceIn(lo, hi) else wDp / 2f) - winXdp
+    }
+
+    private fun applyCapsuleGeometry(p: WindowManager.LayoutParams) {
+        p.width = dp(winWdp)
+        p.height = dp(winHdp)
+        p.x = dp(winXdp)
+        p.y = 0
+    }
+
+    private fun applyBubbleGeometry(p: WindowManager.LayoutParams) {
+        val size = dp(40f * bubbleScale + 6f)
+        p.width = size
+        p.height = size
+        p.x = (camX - size / 2f).roundToInt()
+        p.y = (camY - size / 2f).roundToInt()
+        Log.i(TAG, "bolha em x=${camX.roundToInt()} y=${camY.roundToInt()}")
     }
 
     private fun statusBarHeight(): Int {
@@ -385,31 +466,37 @@ class IslandService : Service() {
     }
 
     private fun pushConfig() {
-        val dm = ui.resources.displayMetrics
-        val screenWpx = runCatching {
-            if (Build.VERSION.SDK_INT >= 30) wm.currentWindowMetrics.bounds.width() else dm.widthPixels
-        }.getOrDefault(dm.widthPixels)
-        // A bolha tem 34 dp em volta de uma câmera de ~20 dp.
-        val auto = (cutoutDp / 20f).coerceIn(0.85f, 1.6f)
+        val d = ui.resources.displayMetrics.density
         js(
             JSONObject()
                 .put("type", "cfg")
-                .put("cy", (camY / dm.density).toDouble())
-                .put("screenW", (screenWpx / dm.density).toDouble())
-                .put("scale", prefs.scale.toDouble())
-                .put("bscale", (auto * prefs.bubbleScale).toDouble())
+                .put("bx", (camX / d - winXdp).toDouble())
+                .put("by", (camY / d).toDouble())
+                .put("capCx", capCxDp.toDouble())
+                .put("capTop", capTopDp.toDouble())
+                .put("z", zoom.toDouble())
+                .put("bscale", bubbleScale.toDouble())
         )
     }
 
-    private fun applySize(wPx: Int, hPx: Int) {
-        val p = lp ?: return
-        val r = root ?: return
-        p.width = wPx.coerceAtLeast(1)
-        p.height = hPx.coerceAtLeast(1)
-        p.x = (camX - p.width / 2f).roundToInt()
-        p.y = 0
-        r.visibility = if (landscape) View.GONE else View.VISIBLE
-        runCatching { wm.updateViewLayout(r, p) }
+    /** Mostra/esconde as camadas conforme o estado (aberta/fechada, retrato/paisagem). */
+    private fun applyVisibility() {
+        val b = bubble
+        val r = root
+        val p = lp
+        b?.visibility = if (landscape) View.GONE else View.VISIBLE
+        if (r != null && p != null) {
+            val show = islandOpen && !landscape
+            val wantAlpha = if (show) 1f else 0f
+            val touchFlag = WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            val wantFlags = if (show) p.flags and touchFlag.inv() else p.flags or touchFlag
+            if (p.alpha != wantAlpha || p.flags != wantFlags) {
+                p.alpha = wantAlpha
+                p.flags = wantFlags
+                runCatching { wm.updateViewLayout(r, p) }
+            }
+            r.visibility = if (landscape) View.GONE else View.VISIBLE
+        }
     }
 
     fun js(cmd: JSONObject) {
@@ -443,16 +530,30 @@ class IslandService : Service() {
             }
         }
 
+        /** A cápsula está visível (aberta ou animando o fechamento)? */
         @JavascriptInterface
-        fun resize(w: Float, h: Float) {
-            if (w.isNaN() || h.isNaN() || w <= 0f || h <= 0f) return
-            main.post { applySize(dp(w), dp(h)) }
+        fun setOpen(open: Boolean) {
+            main.post {
+                islandOpen = open
+                applyVisibility()
+            }
+        }
+
+        /** Cor (#RRGGBB) e progresso (0–1) do anel da bolha. */
+        @JavascriptInterface
+        fun bubble(color: String, pct: Float) {
+            val c = runCatching { Color.parseColor(color) }.getOrNull() ?: return
+            main.post { bubble?.setState(c, if (pct.isNaN()) 0f else pct) }
         }
 
         @JavascriptInterface
         fun report(json: String) {
             lastState = json
-            islandOpen = runCatching { JSONObject(json).optBoolean("open") }.getOrDefault(false)
+        }
+
+        @JavascriptInterface
+        fun tick() {
+            main.post { root?.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP) }
         }
 
         @JavascriptInterface

@@ -57,18 +57,23 @@ sleep 2
 shot 03-recolhida
 
 step "Tocando na bolha (abre) e fora (fecha)"
-SIZE="$(adb shell wm size | tr -d '\r' | sed -n 's/.*: \([0-9]*\)x\([0-9]*\).*/\1 \2/p' | tail -1)"
-W="${SIZE%% *}"
-CUT="$(adb shell dumpsys window | tr -d '\r' | grep -o 'DisplayCutout{insets=Rect(0, [0-9]*' | head -1 | grep -o '[0-9]*$')"
-[ -n "$CUT" ] || CUT=80
-BX=$((W / 2)); BY=$((CUT / 2))
-echo "tocando a bolha em $BX,$BY"
+POS="$(adb logcat -d -s Ilha:I | grep -o 'bolha em x=[0-9]* y=[0-9]*' | tail -1)"
+echo "posição informada: $POS"
+BX="$(echo "$POS" | sed -n 's/.*x=\([0-9]*\).*/\1/p')"
+BY="$(echo "$POS" | sed -n 's/.*y=\([0-9]*\).*/\1/p')"
+[ -n "$BX" ] || { fail "posição da bolha não informada"; BX=540; BY=60; }
 adb shell input tap "$BX" "$BY"
 sleep 2
-shot 04-toque-abriu
-adb shell input tap "$BX" 1500
+shot 04-toque-na-bolha-abriu
+adb shell dumpsys window windows | tr -d '\r' | grep -A3 "cápsula\|c.psula" | head -8 || true
+adb shell input tap 540 1700
 sleep 2
 shot 05-toque-fora-fechou
+adb shell input tap "$BX" "$BY"
+sleep 1
+adb shell input tap "$BX" "$BY"
+sleep 2
+shot 05b-bolha-duas-vezes
 
 step "Mensagem de grupo do WhatsApp com foto (notificação real pelo leitor)"
 cmdc "shelltest:on"
@@ -76,6 +81,8 @@ AV="$(python3 "$HERE/avatar.py")"
 adb shell "cmd notification post -S messaging --conversation 'Família Meneses' --message 'Ana:Chegando em 10 minutos, separa a mesa!' -I data:base64,$AV familia 'Nova mensagem'" || fail "não consegui postar a notificação de teste"
 sleep 3
 shot 06-whatsapp-grupo-com-foto
+adb logcat -d -s IlhaNotif:* | tail -5
+adb logcat -d -s IlhaNotif:I | grep -q "aba=wa foto=true" || fail "a mensagem do grupo com foto NÃO apareceu na ilha"
 adb shell "cmd notification post -I data:base64,$AV -t 'Carlos' contato 'Oi, já enviei o arquivo pra você.'" || true
 sleep 3
 shot 07-whatsapp-contato-com-foto

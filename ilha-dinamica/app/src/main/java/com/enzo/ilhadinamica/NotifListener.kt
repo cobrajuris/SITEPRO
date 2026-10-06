@@ -57,6 +57,7 @@ class NotifListener : NotificationListenerService() {
     private fun handle(sbn: StatusBarNotification) {
         val svc = IslandService.instance ?: return
         val n = sbn.notification ?: return
+        Log.d(TAG, "notificação de ${sbn.packageName}")
         if (n.category == Notification.CATEGORY_TRANSPORT) {
             svc.refreshMedia()
             return
@@ -125,6 +126,7 @@ class NotifListener : NotificationListenerService() {
         if (tab == "ifood" || tab == "maps") {
             ex.getCharSequence(Notification.EXTRA_SUB_TEXT)?.let { o.put("sub", it.toString()) }
         }
+        Log.i(TAG, "mostrando na ilha: aba=$tab foto=${avatar != null}")
         svc.js(o)
     }
 

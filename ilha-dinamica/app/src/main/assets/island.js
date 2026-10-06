@@ -8,7 +8,9 @@
   const H = window.IslandHost || null;
   const call = (name, ...a) => { try { if (H && H[name]) return H[name](...a); } catch (e) { /* ignora */ } return undefined; };
   const host = {
-    resize: (w, h) => call('resize', w, h),
+    setOpen: (o) => call('setOpen', o),
+    bubble: (c, p) => call('bubble', c, p),
+    tick: () => call('tick'),
     report: (j) => call('report', j),
     media: (a) => call('media', a),
     setVolume: (v) => call('setVolume', v),
@@ -111,7 +113,7 @@
       const now = new Date();
       this.state = {
         open: false, closing: false, tab: 'music',
-        cy: 28, screenW: 394, scale: 1, bscale: 1,
+        bx: 197, by: 28, capCx: 197, capTop: 54, z: 1, bscale: 1,
         playing: true, pos: 72, dur: 214, trk: 1, vol: 80,
         real: false, title: '', artist: '', art: '',
         tIdx: 2, timer: 300, total: 300, run: false,
@@ -130,7 +132,8 @@
         asState: 'compose', asIdx: 0, asDelayIdx: 0, asLeft: 0, asAnsLeft: 0,
         drag: null
       };
-      this.lastSize = '';
+      this.lastOpen = null;
+      this.lastBubble = '';
       this.lastReport = '';
       this.autoT = null;
       this.outT = null;
@@ -199,7 +202,7 @@
       switch (c.type) {
         case 'cfg': {
           const n = {};
-          ['cy', 'screenW', 'scale', 'bscale'].forEach((k) => { if (c[k] != null && isFinite(+c[k])) n[k] = +c[k]; });
+          ['bx', 'by', 'capCx', 'capTop', 'z', 'bscale'].forEach((k) => { if (c[k] != null && isFinite(+c[k])) n[k] = +c[k]; });
           this.setState(n);
           break;
         }
@@ -276,27 +279,17 @@
       this.pickTab(ORDER[(i + d + ORDER.length) % ORDER.length], true);
     }
 
-    /* ---------- janela flutuante: tamanho e estado ---------- */
-    zoom() {
-      const s = this.state;
-      return clamp(Math.min(s.scale, (s.screenW - 20) / CW), 0.5, 1.2);
-    }
-    capTop() { return this.state.cy + 17 * this.state.bscale + 9; }
+    /* ---------- geometria (vem do Android) e estado para o Android ---------- */
+    zoom() { return clamp(this.state.z || 1, 0.5, 1.2); }
+    capTop() { return this.state.capTop; }
 
     sync() {
       const s = this.state;
-      const z = this.zoom();
-      let w, h;
-      if (!s.open) {
-        w = Math.ceil(40 * s.bscale) + 6;
-        h = Math.ceil(s.cy + 20 * s.bscale + 4);
-      } else {
-        w = Math.min(Math.ceil(s.screenW), Math.ceil(CW * z) + 56);
-        h = Math.ceil(this.capTop() + CH * z + 40);
-        if (s.tab === 'file' && s.file === 'idle') h += 150;
-      }
-      const key = w + 'x' + h;
-      if (key !== this.lastSize) { this.lastSize = key; host.resize(w, h); }
+      // A cápsula fica visível (e tocável) enquanto aberta ou animando o fechamento.
+      if (s.open !== this.lastOpen) { this.lastOpen = s.open; host.setOpen(!!s.open); }
+      const pct = Math.round(clamp(this.progress(), 0, 1) * 1000) / 1000;
+      const bub = COLOR[s.tab] + '|' + pct;
+      if (bub !== this.lastBubble) { this.lastBubble = bub; host.bubble(COLOR[s.tab], pct); }
       const rep = JSON.stringify({ tab: s.tab, open: s.open && !s.closing });
       if (rep !== this.lastReport) { this.lastReport = rep; host.report(rep); }
     }
@@ -719,15 +712,16 @@
       const z = this.zoom();
       const color = COLOR[s.tab];
       const capTop = this.capTop();
-      const lift = (s.cy - capTop) / z;            // a cápsula nasce exatamente da bolha
+      // A cápsula nasce exatamente da bolha (mesmo com a câmera no canto).
+      const lx = (s.bx - s.capCx) / z, ly = (s.by - capTop) / z;
       const d = s.drag;
       const showCard = s.open && !s.closing && s.tab === 'file' && s.file === 'idle';
       const r = 15, C = 2 * Math.PI * r;
 
-      return html`<div style="position:fixed;inset:0">
+      return html`<div style="position:fixed;inset:0" onPointerDownCapture=${(e) => { if (e.target.closest && e.target.closest('.ib')) host.tick(); }}>
         ${s.open ? html`<div onPointerDown=${() => this.collapse()} style="position:absolute;inset:0;z-index:1"></div>` : null}
 
-        <div style=${'position:absolute;z-index:5;left:50%;width:40px;height:40px;margin-left:-20px;top:' + (s.cy - 20) + 'px;transform:scale(' + s.bscale + ')'}>
+        ${!H ? html`<div style=${'position:absolute;z-index:5;width:40px;height:40px;left:' + (s.bx - 20) + 'px;top:' + (s.by - 20) + 'px;transform:scale(' + s.bscale + ')'}>
           <button class="ib" onClick=${() => this.toggle()} aria-label="Abrir ilha" style="position:absolute;left:3px;top:3px;width:34px;height:34px;border-radius:50%;background:radial-gradient(circle at 50% 38%, #141418, #050506);box-shadow:inset 0 0 0 1px rgba(255,255,255,.06)">
             <svg width="34" height="34" viewBox="0 0 34 34" style="position:absolute;inset:0">
               <circle cx="17" cy="17" r=${r} fill="none" stroke="#1E1F24" stroke-width="2"/>
@@ -736,11 +730,11 @@
                 transform="rotate(-90 17 17)" style="transition:stroke-dashoffset 1s linear, stroke .4s ease"/>
             </svg>
           </button>
-        </div>
+        </div>` : null}
 
-        ${s.open ? html`<div style=${'position:absolute;z-index:5;left:50%;transform:translateX(-50%);top:' + capTop + 'px'}
+        ${s.open ? html`<div style=${'position:absolute;z-index:5;transform:translateX(-50%);left:' + s.capCx + 'px;top:' + capTop + 'px'}
               onPointerDown=${(e) => this.capDown(e)} onPointerUp=${(e) => this.capUp(e)}>
-            <div class=${'cap ' + (s.closing ? 'out' : 'in')} style=${'--lift:' + lift + 'px;zoom:' + z + ';width:' + CW + 'px;height:' + CH + 'px;border-radius:' + CH / 2 + 'px;background:#000;color:#fff;overflow:hidden;position:relative;transition:box-shadow .4s ease;box-shadow:' + capShadow(s.tab)}>
+            <div class=${'cap ' + (s.closing ? 'out' : 'in')} style=${'--lx:' + lx + 'px;--ly:' + ly + 'px;zoom:' + z + ';width:' + CW + 'px;height:' + CH + 'px;border-radius:' + CH / 2 + 'px;background:#000;color:#fff;overflow:hidden;position:relative;transition:box-shadow .4s ease;box-shadow:' + capShadow(s.tab)}>
               <div class="fx" key=${s.tab} style="height:100%;padding:8px 16px 8px 8px;display:flex;gap:10px;align-items:center">
                 ${this.renderBody()}
               </div>
@@ -751,13 +745,13 @@
           </div>` : null}
 
         ${showCard ? html`
-          <div style=${'position:absolute;z-index:5;left:50%;margin-left:-10px;pointer-events:none;top:' + (capTop + CH * z + 6) + 'px'}>
+          <div style=${'position:absolute;z-index:5;pointer-events:none;left:' + (s.capCx - 10) + 'px;top:' + (capTop + CH * z + 6) + 'px'}>
             <svg width="20" height="34" viewBox="0 0 20 34" fill="none" stroke="#5BC0FF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="bob"><path d="M10 32V6" stroke-dasharray="4 5"/><path d="M3 12l7-8 7 8"/></svg>
           </div>
           <button class=${'ib card' + (d ? ' dragging' : '')}
             onPointerDown=${(e) => this.cardDown(e)} onPointerMove=${(e) => this.cardMove(e)} onPointerUp=${(e) => this.cardUp(e)} onPointerCancel=${() => this.setState({ drag: null })}
             aria-label="Arraste o Relatorio.pdf até a cápsula"
-            style=${'position:absolute;z-index:6;left:50%;margin-left:-48px;width:96px;height:100px;border-radius:18px;background:#F7F8FA;color:#17181A;flex-direction:column;gap:4px;touch-action:none;box-shadow:0 12px 26px rgba(0,0,0,.35), 0 0 0 1px rgba(255,255,255,.6);top:' + this.cardTop() + 'px' + (d ? ';transform:translate(' + d.dx + 'px,' + d.dy + 'px) scale(.92)' : '')}>
+            style=${'position:absolute;z-index:6;width:96px;height:100px;border-radius:18px;background:#F7F8FA;color:#17181A;flex-direction:column;gap:4px;touch-action:none;box-shadow:0 12px 26px rgba(0,0,0,.35), 0 0 0 1px rgba(255,255,255,.6);left:' + (s.capCx - 48) + 'px;top:' + this.cardTop() + 'px' + (d ? ';transform:translate(' + d.dx + 'px,' + d.dy + 'px) scale(.92)' : '')}>
             <span style="width:34px;height:40px;border-radius:7px;background:#E5484D;color:#fff;display:flex;align-items:flex-end;justify-content:center;padding-bottom:5px;font-size:9px;font-weight:800">PDF</span>
             <span style="font-size:11.5px;font-weight:700">Relatorio.pdf</span>
             <span style="font-size:10px;color:#5C6066;margin-top:-3px">2,4 MB</span>
