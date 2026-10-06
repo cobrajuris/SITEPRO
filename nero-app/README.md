@@ -1,10 +1,10 @@
 # Nero — assistente pessoal (Android)
 
-App Android nativo (Kotlin, componentes nativos do Android) com a identidade do gato Nero, usando o Claude como cérebro.
+App Android nativo (Kotlin, componentes nativos do Android) com a identidade do gato Nero, usando a Groq como cérebro.
 
 ## Recursos
 - Chat com respostas em tempo real (streaming) e botão de parar
-- Modo rápido / **modo profundo** (raciocina mais em tarefas difíceis)
+- Modo rápido (`llama-3.3-70b-versatile`) / **modo profundo** (`openai/gpt-oss-120b`, raciocina antes de responder)
 - Histórico de conversas salvo no aparelho, com menu lateral
 - Copiar e refazer respostas, blocos de código destacados
 - Sugestões rápidas na tela inicial, splash animada com a logo
@@ -15,7 +15,7 @@ Cada push que altera `nero-app/` dispara o workflow **Nero APK** no GitHub Actio
 Abra a execução em *Actions → Nero APK* e baixe o artefato `Nero-apk`.
 
 ## Primeiro uso
-Abra **Ajustes**, cole sua chave de API da Anthropic (console.anthropic.com) e salve.
+Abra **Ajustes**, cole sua chave de API da Groq (console.groq.com/keys) e salve.
 A chave fica só no aparelho.
 
 ## Compilar localmente
