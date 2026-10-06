@@ -32,6 +32,11 @@ class IslandPrefs(context: Context) {
         get() = sp.getFloat("dy", 0f)
         set(v) = sp.edit().putFloat("dy", v).apply()
 
+    /** Somente para testes automáticos via adb: trata notificações do shell como WhatsApp. */
+    var shellTest: Boolean
+        get() = sp.getBoolean("shellTest", false)
+        set(v) = sp.edit().putBoolean("shellTest", v).apply()
+
     /** Abrir a cápsula automaticamente quando chega notificação/mídia real. */
     var realEvents: Boolean
         get() = sp.getBoolean("realEvents", true)

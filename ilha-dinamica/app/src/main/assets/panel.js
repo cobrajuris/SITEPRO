@@ -94,7 +94,7 @@
           <label class="card" style="cursor:pointer">
             <div style="flex:1">
               <div style="font-size:15px;font-weight:700">Abrir sozinha com eventos reais</div>
-              <div style="font-size:12.5px;color:#5C6066;margin-top:2px">Quando chega uma mensagem ou começa uma música, a cápsula abre por 8 segundos.</div>
+              <div style="font-size:12.5px;color:#5C6066;margin-top:2px">Quando chega uma mensagem (com a foto do contato ou do grupo) ou começa uma música, a cápsula abre por alguns segundos.</div>
             </div>
             <input type="checkbox" checked=${s.real} onChange=${(e) => { A.setReal(e.target.checked); this.setState({ real: e.target.checked }); }} style="width:22px;height:22px;accent-color:#17181A"/>
           </label>
@@ -111,8 +111,8 @@
         </div>
 
         <div style="border-top:1.5px solid #D2D3CD;padding-top:20px;display:flex;flex-direction:column;gap:10px">
-          <div class="row"><b>Bolha</b>Círculo de 32 px em volta da câmera, com um anel fino de progresso da aba atual.</div>
-          <div class="row"><b>Cápsula</b>Fixa logo abaixo da câmera: círculo à esquerda, roda de itens no meio e roda numérica à direita.</div>
+          <div class="row"><b>Bolha</b>Bolinha fixa em volta da câmera, só com um anel fino de carregamento na cor da aba — sem pulsar.</div>
+          <div class="row"><b>Cápsula</b>Compacta, nasce da bolha logo abaixo da câmera: foto ou capa à esquerda, informações no meio e controles à direita.</div>
           <div class="row"><b>Rodas</b>Toque no item de cima ou de baixo para girar; o ponto confirma ou toca/pausa.</div>
           <div class="row"><b>Gestos</b>Deslize a cápsula para os lados para trocar de aba; para cima ou toque fora para recolher.</div>
         </div>

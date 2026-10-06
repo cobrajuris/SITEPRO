@@ -7,17 +7,19 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.ComponentName
+import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
-import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.hardware.display.DisplayManager
 import android.media.AudioManager
 import android.media.MediaMetadata
+import android.media.Ringtone
 import android.media.RingtoneManager
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
@@ -32,18 +34,21 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.provider.CalendarContract
 import android.provider.Settings
-import android.util.Base64
+import android.util.Log
+import android.view.Display
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.util.Calendar
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -51,13 +56,23 @@ import kotlin.math.roundToInt
 /**
  * Serviço em primeiro plano que desenha a ilha (bolha + cápsula) por cima de todos os apps,
  * centrada no furo da câmera frontal.
+ *
+ * Regras de estabilidade:
+ *  - startForeground() é chamado em TODA chamada de onStartCommand (evita o encerramento forçado
+ *    "did not then call startForeground").
+ *  - Se o processo de renderização do WebView morrer, a ilha é recriada em vez de derrubar o app.
+ *  - A janela usa um contexto de janela próprio (Android 11+), como o sistema recomenda.
+ *  - Nada vindo do JavaScript ou de outros apps pode lançar exceção para fora.
  */
 class IslandService : Service() {
 
     companion object {
+        private const val TAG = "Ilha"
         const val ACTION_STOP = "com.enzo.ilhadinamica.STOP"
         const val ACTION_CMD = "com.enzo.ilhadinamica.CMD"
         const val EXTRA_JSON = "json"
+        /** Comando curto (usado pelos testes automáticos): "tab:wa", "open", "close", "shelltest:on". */
+        const val EXTRA_C = "c"
         private const val CHANNEL = "ilha"
         private const val NOTIF_ID = 26
 
@@ -70,12 +85,12 @@ class IslandService : Service() {
         var lastState: String = "{\"tab\":\"music\",\"open\":false}"
 
         fun start(ctx: Context) {
-            val i = Intent(ctx, IslandService::class.java)
-            ctx.startForegroundService(i)
+            runCatching { ctx.startForegroundService(Intent(ctx, IslandService::class.java)) }
+                .onFailure { Log.w(TAG, "não foi possível iniciar", it) }
         }
 
         fun stop(ctx: Context) {
-            ctx.startService(Intent(ctx, IslandService::class.java).setAction(ACTION_STOP))
+            runCatching { ctx.stopService(Intent(ctx, IslandService::class.java)) }
         }
 
         /** Envia um comando JSON para a ilha (se estiver rodando). */
@@ -85,13 +100,16 @@ class IslandService : Service() {
     }
 
     private val main = Handler(Looper.getMainLooper())
-    private lateinit var wm: WindowManager
     private lateinit var prefs: IslandPrefs
+    private lateinit var ui: Context
+    private lateinit var wm: WindowManager
     private var root: FrameLayout? = null
     private var web: WebView? = null
     private var lp: WindowManager.LayoutParams? = null
     private var pageReady = false
     private val pending = ArrayList<String>()
+    private var islandOpen = false
+    private val rendererDeaths = ArrayList<Long>()
 
     private var camX = 0f
     private var camY = 0f
@@ -100,7 +118,7 @@ class IslandService : Service() {
 
     private var controller: MediaController? = null
     private var lastArtKey: String? = null
-    private var ringtone: android.media.Ringtone? = null
+    private var ringtone: Ringtone? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -108,92 +126,153 @@ class IslandService : Service() {
         super.onCreate()
         instance = this
         prefs = IslandPrefs(this)
-        wm = getSystemService(WINDOW_SERVICE) as WindowManager
         startAsForeground()
-        if (Settings.canDrawOverlays(this)) createOverlay() else stopSelf()
+        if (!Settings.canDrawOverlays(this)) {
+            stopSelf()
+            return
+        }
+        ui = overlayContext()
+        wm = ui.getSystemService(WindowManager::class.java)
+        runCatching { createOverlay() }.onFailure {
+            Log.e(TAG, "falha ao criar a ilha", it)
+            stopSelf()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_STOP -> {
-                prefs.enabled = false
-                stopSelf()
-                return START_NOT_STICKY
+        startAsForeground()
+        runCatching {
+            when (intent?.action) {
+                ACTION_STOP -> {
+                    prefs.enabled = false
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
+                ACTION_CMD -> {
+                    intent.getStringExtra(EXTRA_JSON)?.let { js(JSONObject(it)) }
+                    intent.getStringExtra(EXTRA_C)?.let { shortCommand(it) }
+                }
             }
-            ACTION_CMD -> intent.getStringExtra(EXTRA_JSON)?.let { js(JSONObject(it)) }
-        }
+        }.onFailure { Log.w(TAG, "comando inválido", it) }
         return START_STICKY
     }
 
     override fun onDestroy() {
         instance = null
+        main.removeCallbacksAndMessages(null)
         stopRing()
+        runCatching { controller?.unregisterCallback(mediaCallback) }
         controller = null
-        root?.let { runCatching { wm.removeView(it) } }
-        web?.destroy()
-        root = null
-        web = null
+        destroyOverlay()
         super.onDestroy()
+    }
+
+    private fun shortCommand(c: String) {
+        val o = JSONObject()
+        when {
+            c.startsWith("tab:") -> o.put("type", "tab").put("id", c.removePrefix("tab:"))
+            c == "open" || c == "close" || c == "toggle" -> o.put("type", c)
+            c == "shelltest:on" -> { prefs.shellTest = true; return }
+            c == "shelltest:off" -> { prefs.shellTest = false; return }
+            else -> return
+        }
+        js(o)
     }
 
     // ---------------------------------------------------------------- notificação fixa
 
     private fun startAsForeground() {
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(
-            NotificationChannel(CHANNEL, getString(R.string.channel_name), NotificationManager.IMPORTANCE_MIN)
-        )
-        val open = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
-        )
-        val stop = PendingIntent.getService(
-            this, 1, Intent(this, IslandService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE
-        )
-        val n = Notification.Builder(this, CHANNEL).setSmallIcon(R.drawable.ic_stat_island)
-            .setContentTitle(getString(R.string.notif_title))
-            .setContentText(getString(R.string.notif_text))
-            .setContentIntent(open)
-            .setOngoing(true)
-            .addAction(Notification.Action.Builder(null, getString(R.string.notif_stop), stop).build())
-            .build()
-        if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-        } else {
-            startForeground(NOTIF_ID, n)
-        }
+        runCatching {
+            val nm = getSystemService(NotificationManager::class.java)
+            nm.createNotificationChannel(
+                NotificationChannel(CHANNEL, getString(R.string.channel_name), NotificationManager.IMPORTANCE_MIN).apply {
+                    setShowBadge(false)
+                }
+            )
+            val open = PendingIntent.getActivity(
+                this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
+            )
+            val stop = PendingIntent.getService(
+                this, 1, Intent(this, IslandService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE
+            )
+            val n = Notification.Builder(this, CHANNEL)
+                .setSmallIcon(R.drawable.ic_stat_island)
+                .setContentTitle(getString(R.string.notif_title))
+                .setContentText(getString(R.string.notif_text))
+                .setContentIntent(open)
+                .setOngoing(true)
+                .setShowWhen(false)
+                .addAction(Notification.Action.Builder(null, getString(R.string.notif_stop), stop).build())
+                .build()
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            } else {
+                startForeground(NOTIF_ID, n)
+            }
+        }.onFailure { Log.e(TAG, "startForeground falhou", it) }
     }
 
     // ---------------------------------------------------------------- janela flutuante
 
-    @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
+    private fun overlayContext(): Context {
+        if (Build.VERSION.SDK_INT >= 30) {
+            runCatching {
+                val display = getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY)
+                return createDisplayContext(display)
+                    .createWindowContext(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null)
+            }
+        }
+        return this
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
     private fun createOverlay() {
-        val w = WebView(this)
+        if (root != null) return
+        pageReady = false
+        val w = WebView(ui)
         w.setBackgroundColor(Color.TRANSPARENT)
-        w.setLayerType(View.LAYER_TYPE_HARDWARE, null)
         w.isVerticalScrollBarEnabled = false
         w.isHorizontalScrollBarEnabled = false
         w.overScrollMode = View.OVER_SCROLL_NEVER
+        w.isHapticFeedbackEnabled = true
         w.settings.javaScriptEnabled = true
         w.settings.domStorageEnabled = true
-        w.settings.mediaPlaybackRequiresUserGesture = false
+        w.settings.allowFileAccess = false
+        w.settings.allowContentAccess = false
         w.settings.textZoom = 100
+        w.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
         w.addJavascriptInterface(Host(), "IslandHost")
-        w.webViewClient = object : WebViewClient() {}
+        w.webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(m: ConsoleMessage): Boolean {
+                if (m.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
+                    Log.e("IlhaJS", "${m.message()} @${m.lineNumber()}")
+                }
+                return true
+            }
+        }
+        w.webViewClient = object : WebViewClient() {
+            override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                // Sem isso o Android encerra o app inteiro quando o renderizador é morto.
+                Log.w(TAG, "renderizador da ilha encerrado (crash=${detail.didCrash()}); recriando")
+                main.post { recoverFromRendererDeath() }
+                return true
+            }
+        }
 
-        val frame = object : FrameLayout(this) {
+        val frame = object : FrameLayout(ui) {
             override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
                 if (ev.actionMasked == MotionEvent.ACTION_OUTSIDE) {
-                    js(JSONObject().put("type", "close"))
-                    return true
+                    if (islandOpen) js(JSONObject().put("type", "close"))
+                    return false
                 }
                 return super.dispatchTouchEvent(ev)
             }
         }
         frame.addView(w, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
 
-        val type = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         val params = WindowManager.LayoutParams(
-            dp(66f), dp(62f), type,
+            dp(46f), dp(48f),
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                 WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
@@ -209,45 +288,84 @@ class IslandService : Service() {
             else WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
         params.title = "Ilha dinâmica"
+        params.windowAnimations = 0
 
-        root = frame
-        web = w
-        lp = params
         locateCamera()
         params.x = (camX - params.width / 2f).roundToInt()
         params.y = 0
         wm.addView(frame, params)
+        root = frame
+        web = w
+        lp = params
+        frame.visibility = if (landscape) View.GONE else View.VISIBLE
         w.loadUrl("file:///android_asset/island.html")
+    }
+
+    private fun destroyOverlay() {
+        pageReady = false
+        val r = root
+        val w = web
+        root = null
+        web = null
+        lp = null
+        if (r != null) runCatching { wm.removeViewImmediate(r) }
+        if (w != null) runCatching {
+            w.removeJavascriptInterface("IslandHost")
+            w.stopLoading()
+            w.destroy()
+        }
+    }
+
+    private fun recoverFromRendererDeath() {
+        if (instance !== this) return
+        val now = SystemClock.elapsedRealtime()
+        rendererDeaths.removeAll { now - it > 60_000 }
+        rendererDeaths.add(now)
+        destroyOverlay()
+        if (rendererDeaths.size > 4) {
+            // Algo muito errado no aparelho: desliga com segurança em vez de entrar em loop.
+            Log.e(TAG, "renderizador caiu várias vezes; desligando a ilha")
+            stopSelf()
+            return
+        }
+        main.postDelayed({ if (instance === this) runCatching { createOverlay() } }, 400)
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        reconfigure(250)
+    }
+
+    /** Reaplica posição/tamanho (rotação, ajustes do usuário). */
+    fun reconfigure(delayMs: Long = 0) {
         main.postDelayed({
-            locateCamera()
-            pushConfig()
-            lp?.let { applySize(it.width, it.height) }
-        }, 300)
+            if (root == null) return@postDelayed
+            runCatching {
+                locateCamera()
+                pushConfig()
+                lp?.let { applySize(it.width, it.height) }
+            }
+        }, delayMs)
     }
 
     /** Descobre o centro do furo da câmera (display cutout); sem furo, usa o topo central. */
     private fun locateCamera() {
-        val dm = resources.displayMetrics
+        val dm = ui.resources.displayMetrics
         var screenW = dm.widthPixels.toFloat()
         var cutout: android.view.DisplayCutout? = null
-        if (Build.VERSION.SDK_INT >= 30) {
-            val m = wm.currentWindowMetrics
-            screenW = m.bounds.width().toFloat()
-            cutout = m.windowInsets.displayCutout
-        } else if (Build.VERSION.SDK_INT >= 29) {
-            @Suppress("DEPRECATION")
-            cutout = wm.defaultDisplay.cutout
+        runCatching {
+            if (Build.VERSION.SDK_INT >= 30) {
+                val m = wm.currentWindowMetrics
+                screenW = m.bounds.width().toFloat()
+                cutout = m.windowInsets.displayCutout
+            } else if (Build.VERSION.SDK_INT >= 29) {
+                @Suppress("DEPRECATION")
+                cutout = wm.defaultDisplay.cutout
+            }
         }
-        landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-        var rect: Rect? = null
-        if (cutout != null) {
-            rect = cutout.boundingRects.firstOrNull { it.top <= 0 && it.width() < screenW * 0.6f }
-        }
-        if (rect != null && !rect.isEmpty) {
+        landscape = ui.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        val rect: Rect? = cutout?.boundingRects?.firstOrNull { it.top <= 0 && it.width() < screenW * 0.6f && !it.isEmpty }
+        if (rect != null) {
             camX = rect.exactCenterX()
             camY = rect.exactCenterY()
             cutoutDp = min(rect.width(), rect.height()) / dm.density
@@ -262,40 +380,33 @@ class IslandService : Service() {
 
     private fun statusBarHeight(): Int {
         @SuppressLint("InternalInsetResource", "DiscouragedApi")
-        val id = resources.getIdentifier("status_bar_height", "dimen", "android")
-        return if (id > 0) resources.getDimensionPixelSize(id) else dp(24f)
+        val id = ui.resources.getIdentifier("status_bar_height", "dimen", "android")
+        return if (id > 0) ui.resources.getDimensionPixelSize(id) else dp(24f)
     }
 
     private fun pushConfig() {
-        val dm = resources.displayMetrics
-        val screenWdp = (if (Build.VERSION.SDK_INT >= 30) wm.currentWindowMetrics.bounds.width() else dm.widthPixels) / dm.density
-        // A bolha do protótipo tem 34 dp em volta de uma câmera de 20 dp.
+        val dm = ui.resources.displayMetrics
+        val screenWpx = runCatching {
+            if (Build.VERSION.SDK_INT >= 30) wm.currentWindowMetrics.bounds.width() else dm.widthPixels
+        }.getOrDefault(dm.widthPixels)
+        // A bolha tem 34 dp em volta de uma câmera de ~20 dp.
         val auto = (cutoutDp / 20f).coerceIn(0.85f, 1.6f)
         js(
             JSONObject()
                 .put("type", "cfg")
-                .put("cy", camY / dm.density)
-                .put("screenW", screenWdp)
+                .put("cy", (camY / dm.density).toDouble())
+                .put("screenW", (screenWpx / dm.density).toDouble())
                 .put("scale", prefs.scale.toDouble())
                 .put("bscale", (auto * prefs.bubbleScale).toDouble())
         )
     }
 
-    /** Reaplica posição/tamanho após o usuário mexer nos ajustes. */
-    fun reconfigure() {
-        main.post {
-            locateCamera()
-            pushConfig()
-            lp?.let { applySize(it.width, it.height) }
-        }
-    }
-
     private fun applySize(wPx: Int, hPx: Int) {
         val p = lp ?: return
         val r = root ?: return
-        p.width = wPx
-        p.height = hPx
-        p.x = (camX - wPx / 2f).roundToInt()
+        p.width = wPx.coerceAtLeast(1)
+        p.height = hPx.coerceAtLeast(1)
+        p.x = (camX - p.width / 2f).roundToInt()
         p.y = 0
         r.visibility = if (landscape) View.GONE else View.VISIBLE
         runCatching { wm.updateViewLayout(r, p) }
@@ -306,14 +417,14 @@ class IslandService : Service() {
         main.post {
             val w = web
             if (w == null || !pageReady) {
-                pending.add(s)
+                if (pending.size < 50) pending.add(s)
                 return@post
             }
-            w.evaluateJavascript("window.island&&island.cmd($s)", null)
+            runCatching { w.evaluateJavascript("window.island&&island.cmd($s)", null) }
         }
     }
 
-    private fun dp(v: Float): Int = (v * resources.displayMetrics.density).roundToInt()
+    private fun dp(v: Float): Int = (v * (if (::ui.isInitialized) ui else this).resources.displayMetrics.density).roundToInt()
 
     // ---------------------------------------------------------------- ponte JS → Android
 
@@ -322,43 +433,47 @@ class IslandService : Service() {
         fun ready() {
             main.post {
                 pageReady = true
-                pushConfig()
+                runCatching { pushConfig() }
                 val copy = ArrayList(pending)
                 pending.clear()
-                copy.forEach { web?.evaluateJavascript("window.island&&island.cmd($it)", null) }
+                copy.forEach { s -> runCatching { web?.evaluateJavascript("window.island&&island.cmd($s)", null) } }
                 refreshMedia()
-                pushBrightness()
+                runCatching { pushBrightness() }
                 pushCalendar()
             }
         }
 
         @JavascriptInterface
         fun resize(w: Float, h: Float) {
+            if (w.isNaN() || h.isNaN() || w <= 0f || h <= 0f) return
             main.post { applySize(dp(w), dp(h)) }
         }
 
         @JavascriptInterface
         fun report(json: String) {
             lastState = json
+            islandOpen = runCatching { JSONObject(json).optBoolean("open") }.getOrDefault(false)
         }
 
         @JavascriptInterface
         fun media(action: String) {
-            main.post { mediaAction(action) }
+            main.post { runCatching { mediaAction(action) } }
         }
 
         @JavascriptInterface
         fun setVolume(pct: Int) {
-            val am = getSystemService(AUDIO_SERVICE) as AudioManager
-            val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-            runCatching { am.setStreamVolume(AudioManager.STREAM_MUSIC, (pct * max / 100f).roundToInt(), 0) }
+            runCatching {
+                val am = getSystemService(AUDIO_SERVICE) as AudioManager
+                val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                am.setStreamVolume(AudioManager.STREAM_MUSIC, (pct.coerceIn(0, 100) * max / 100f).roundToInt(), 0)
+            }
         }
 
         @JavascriptInterface
         fun setBrightness(pct: Int, mode: Int) {
-            if (!Settings.System.canWrite(this@IslandService)) return
-            val cr = contentResolver
             runCatching {
+                if (!Settings.System.canWrite(this@IslandService)) return
+                val cr = contentResolver
                 Settings.System.putInt(
                     cr, Settings.System.SCREEN_BRIGHTNESS_MODE,
                     if (mode == 0) Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC else Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL
@@ -371,23 +486,25 @@ class IslandService : Service() {
 
         @JavascriptInterface
         fun buzz(kind: String) {
-            main.post { feedback(kind) }
+            main.post { runCatching { feedback(kind) } }
         }
 
         @JavascriptInterface
         fun openApp(tab: String) {
-            main.post { launchFor(tab) }
+            main.post { runCatching { launchFor(tab) } }
         }
     }
 
     // ---------------------------------------------------------------- feedback
 
-    private fun vibrator(): Vibrator? = if (Build.VERSION.SDK_INT >= 31) {
-        (getSystemService(VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
-    } else {
-        @Suppress("DEPRECATION")
-        getSystemService(VIBRATOR_SERVICE) as Vibrator
-    }
+    private fun vibrator(): Vibrator? = runCatching {
+        if (Build.VERSION.SDK_INT >= 31) {
+            (getSystemService(VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            getSystemService(VIBRATOR_SERVICE) as Vibrator
+        }
+    }.getOrNull()
 
     private fun feedback(kind: String) {
         val v = vibrator()
@@ -407,7 +524,7 @@ class IslandService : Service() {
 
     private fun vibrate(v: Vibrator?, pattern: LongArray) {
         if (v == null || !v.hasVibrator()) return
-        v.vibrate(VibrationEffect.createWaveform(pattern, -1))
+        runCatching { v.vibrate(VibrationEffect.createWaveform(pattern, -1)) }
     }
 
     private fun playTone(type: Int, maxMs: Long) {
@@ -451,70 +568,63 @@ class IslandService : Service() {
     /** Escolhe a sessão de mídia ativa (precisa do acesso às notificações). */
     fun refreshMedia() {
         main.post {
-            val msm = getSystemService(MEDIA_SESSION_SERVICE) as MediaSessionManager
-            val list = runCatching {
-                msm.getActiveSessions(ComponentName(this, NotifListener::class.java))
-            }.getOrNull() ?: return@post
-            val pick = list.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING } ?: list.firstOrNull()
-            if (pick?.sessionToken != controller?.sessionToken) {
-                controller?.unregisterCallback(mediaCallback)
-                controller = pick
-                pick?.registerCallback(mediaCallback, main)
-                lastArtKey = null
-            }
-            if (pick == null) js(JSONObject().put("type", "media").put("src", "none"))
-            else pushMedia(false)
+            runCatching {
+                val msm = getSystemService(MEDIA_SESSION_SERVICE) as MediaSessionManager
+                val list = msm.getActiveSessions(ComponentName(this, NotifListener::class.java))
+                val pick = list.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING } ?: list.firstOrNull()
+                if (pick?.sessionToken != controller?.sessionToken) {
+                    runCatching { controller?.unregisterCallback(mediaCallback) }
+                    controller = pick
+                    pick?.registerCallback(mediaCallback, main)
+                    lastArtKey = null
+                }
+                if (pick == null) js(JSONObject().put("type", "media").put("src", "none"))
+                else pushMedia(false)
+            } // SecurityException sem acesso às notificações: simplesmente sem mídia real.
         }
     }
 
     private fun pushMedia(show: Boolean) {
-        val c = controller ?: return
-        val md = c.metadata
-        val st = c.playbackState
-        val playing = st?.state == PlaybackState.STATE_PLAYING
-        var posMs = st?.position ?: 0L
-        if (playing && st != null && st.lastPositionUpdateTime > 0) {
-            posMs += ((SystemClock.elapsedRealtime() - st.lastPositionUpdateTime) * st.playbackSpeed).toLong()
+        runCatching {
+            val c = controller ?: return
+            val md = c.metadata
+            val st = c.playbackState
+            val playing = st?.state == PlaybackState.STATE_PLAYING
+            var posMs = st?.position ?: 0L
+            if (playing && st != null && st.lastPositionUpdateTime > 0) {
+                posMs += ((SystemClock.elapsedRealtime() - st.lastPositionUpdateTime) * st.playbackSpeed).toLong()
+            }
+            val title = md?.getString(MediaMetadata.METADATA_KEY_TITLE) ?: md?.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE) ?: ""
+            val artist = md?.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: md?.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST) ?: ""
+            val dur = md?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
+            val isYt = c.packageName == "com.google.android.youtube" || c.packageName == "app.revanced.android.youtube"
+            val am = getSystemService(AUDIO_SERVICE) as AudioManager
+            val vol = am.getStreamVolume(AudioManager.STREAM_MUSIC) * 100 / am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+            val o = JSONObject()
+                .put("type", "media")
+                .put("src", if (isYt) "yt" else "music")
+                .put("title", title)
+                .put("artist", artist)
+                .put("playing", playing)
+                .put("pos", (posMs / 1000).coerceAtLeast(0))
+                .put("dur", (dur / 1000).coerceAtLeast(0))
+                .put("vol", vol)
+                .put("show", show && playing)
+            val artKey = c.packageName + "|" + title
+            if (artKey != lastArtKey) {
+                lastArtKey = artKey
+                val bmp = md?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+                    ?: md?.getBitmap(MediaMetadata.METADATA_KEY_ART)
+                    ?: md?.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON)
+                o.put("art", Img.toDataUrl(bmp) ?: "")
+            }
+            js(o)
         }
-        val title = md?.getString(MediaMetadata.METADATA_KEY_TITLE) ?: md?.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE) ?: ""
-        val artist = md?.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: md?.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST) ?: ""
-        val dur = md?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
-        val isYt = c.packageName == "com.google.android.youtube" || c.packageName == "app.revanced.android.youtube"
-        val am = getSystemService(AUDIO_SERVICE) as AudioManager
-        val vol = am.getStreamVolume(AudioManager.STREAM_MUSIC) * 100 / am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
-        val o = JSONObject()
-            .put("type", "media")
-            .put("src", if (isYt) "yt" else "music")
-            .put("title", title)
-            .put("artist", artist)
-            .put("playing", playing)
-            .put("pos", posMs / 1000)
-            .put("dur", dur / 1000)
-            .put("vol", vol)
-            .put("show", show && playing)
-        val artKey = c.packageName + "|" + title
-        if (!isYt && artKey != lastArtKey) {
-            lastArtKey = artKey
-            val bmp = md?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART) ?: md?.getBitmap(MediaMetadata.METADATA_KEY_ART)
-            o.put("art", bmp?.let { toDataUrl(it) } ?: "")
-        }
-        js(o)
     }
 
-    private fun toDataUrl(src: Bitmap): String? = runCatching {
-        val size = 160
-        val scaled = Bitmap.createScaledBitmap(src, size, size, true)
-        val out = ByteArrayOutputStream()
-        scaled.compress(Bitmap.CompressFormat.JPEG, 82, out)
-        "data:image/jpeg;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
-    }.getOrNull()
-
     private fun mediaAction(action: String) {
-        val c = controller
-        val tc = c?.transportControls
+        val tc = controller?.transportControls ?: return
         when {
-            action == "hangup" -> {}
-            tc == null -> {}
             action == "play" -> tc.play()
             action == "pause" -> tc.pause()
             action == "next" -> tc.skipToNext()
@@ -526,12 +636,10 @@ class IslandService : Service() {
     // ---------------------------------------------------------------- brilho e calendário
 
     private fun pushBrightness() {
-        runCatching {
-            val cr = contentResolver
-            val v = Settings.System.getInt(cr, Settings.System.SCREEN_BRIGHTNESS)
-            val auto = Settings.System.getInt(cr, Settings.System.SCREEN_BRIGHTNESS_MODE) == Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC
-            js(JSONObject().put("type", "brightness").put("value", (v * 100 / 255f).roundToInt()).put("auto", auto))
-        }
+        val cr = contentResolver
+        val v = Settings.System.getInt(cr, Settings.System.SCREEN_BRIGHTNESS, 128)
+        val auto = Settings.System.getInt(cr, Settings.System.SCREEN_BRIGHTNESS_MODE, 0) == Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC
+        js(JSONObject().put("type", "brightness").put("value", (v * 100 / 255f).roundToInt()).put("auto", auto))
     }
 
     /** Lê os eventos desta semana (seg–dom) do calendário do aparelho. */
@@ -546,8 +654,8 @@ class IslandService : Service() {
                 val start = cal.timeInMillis
                 val end = start + 7L * 24 * 3600 * 1000
                 val uri = CalendarContract.Instances.CONTENT_URI.buildUpon().also {
-                    android.content.ContentUris.appendId(it, start)
-                    android.content.ContentUris.appendId(it, end)
+                    ContentUris.appendId(it, start)
+                    ContentUris.appendId(it, end)
                 }.build()
                 val days = Array(7) { ArrayList<String>() }
                 var next: Long = Long.MAX_VALUE

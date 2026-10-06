@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.provider.Settings
 import android.view.View
 import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import org.json.JSONObject
@@ -39,7 +40,13 @@ class MainActivity : Activity() {
         web.settings.domStorageEnabled = true
         web.settings.textZoom = 100
         web.addJavascriptInterface(Bridge(), "Android")
-        web.webViewClient = object : WebViewClient() {}
+        web.webViewClient = object : WebViewClient() {
+            override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                // O Android mataria o app inteiro; em vez disso, recria a tela.
+                if (!isFinishing && !isDestroyed) recreate()
+                return true
+            }
+        }
         setContentView(web)
         web.loadUrl("file:///android_asset/panel.html")
 
@@ -51,7 +58,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        web.evaluateJavascript("window.panel&&panel.refresh()", null)
+        runCatching { web.evaluateJavascript("window.panel&&panel.refresh()", null) }
         IslandService.instance?.let {
             it.refreshMedia()
             it.pushCalendar()
@@ -59,14 +66,17 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        web.destroy()
+        runCatching {
+            web.removeJavascriptInterface("Android")
+            web.destroy()
+        }
         super.onDestroy()
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         IslandService.instance?.pushCalendar()
-        web.evaluateJavascript("window.panel&&panel.refresh()", null)
+        runCatching { web.evaluateJavascript("window.panel&&panel.refresh()", null) }
     }
 
     private fun notifAccess(): Boolean {
@@ -105,7 +115,8 @@ class MainActivity : Activity() {
 
         @JavascriptInterface
         fun requestOverlay() = runOnUiThread {
-            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+            runCatching { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) }
+                .onFailure { runCatching { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)) } }
         }
 
         @JavascriptInterface
@@ -114,7 +125,7 @@ class MainActivity : Activity() {
                 Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS)
                     .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME, ComponentName(this@MainActivity, NotifListener::class.java).flattenToString())
             } else Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
-            runCatching { startActivity(i) }.onFailure { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
+            runCatching { startActivity(i) }.onFailure { runCatching { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) } }
         }
 
         @JavascriptInterface
@@ -124,7 +135,7 @@ class MainActivity : Activity() {
 
         @JavascriptInterface
         fun requestWrite() = runOnUiThread {
-            startActivity(Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:$packageName")))
+            runCatching { startActivity(Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:$packageName"))) }
         }
 
         @JavascriptInterface
@@ -138,7 +149,7 @@ class MainActivity : Activity() {
                     requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
                 }
                 prefs.enabled = true
-                IslandService.start(this@MainActivity)
+                if (IslandService.instance == null) IslandService.start(this@MainActivity)
             } else {
                 prefs.enabled = false
                 IslandService.stop(this@MainActivity)
