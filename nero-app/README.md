@@ -1,6 +1,6 @@
 # Nero — assistente pessoal (Android)
 
-App Android nativo (Kotlin + Jetpack Compose) com a identidade do gato Nero, usando o Claude como cérebro.
+App Android nativo (Kotlin, componentes nativos do Android) com a identidade do gato Nero, usando o Claude como cérebro.
 
 ## Recursos
 - Chat com respostas em tempo real (streaming) e botão de parar
