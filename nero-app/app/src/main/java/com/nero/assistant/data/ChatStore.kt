@@ -69,7 +69,11 @@ class ChatStore(context: Context) {
                     updatedAt = o.getLong("updatedAt"),
                     turns = (0 until turnsArr.length()).map { j ->
                         val t = turnsArr.getJSONObject(j)
-                        ChatTurn(Role.valueOf(t.getString("role")), t.getString("text"))
+                        ChatTurn(
+                            Role.valueOf(t.getString("role")),
+                            t.getString("text"),
+                            t.optString("image").takeIf { it.isNotEmpty() },
+                        )
                     },
                 )
             }.sortedByDescending { it.updatedAt }
@@ -81,7 +85,7 @@ class ChatStore(context: Context) {
         list.filter { it.turns.isNotEmpty() }.forEach { c ->
             val turns = JSONArray()
             c.turns.forEach { t ->
-                turns.put(JSONObject().put("role", t.role.name).put("text", t.text))
+                turns.put(JSONObject().put("role", t.role.name).put("text", t.text).put("image", t.imagePath ?: ""))
             }
             arr.put(
                 JSONObject()

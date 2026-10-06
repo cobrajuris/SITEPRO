@@ -3,6 +3,7 @@ package com.nero.assistant.data
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
+import java.io.File
 import java.io.IOException
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
@@ -10,7 +11,8 @@ import java.net.URL
 
 enum class Role { USER, ASSISTANT }
 
-data class ChatTurn(val role: Role, val text: String)
+/** Uma fala da conversa. [imagePath] aponta para a foto anexada pelo usuário, se houver. */
+data class ChatTurn(val role: Role, val text: String, val imagePath: String? = null)
 
 /** Erro amigável para mostrar ao usuário. */
 class NeroException(message: String, cause: Throwable? = null) : Exception(message, cause)
@@ -34,15 +36,27 @@ class OpenRouterService(
         deepMode: Boolean,
         userName: String,
         systemPrompt: String,
+        extraInstructions: String,
         isCancelled: () -> Boolean,
         onText: (String) -> Unit,
     ) {
         val persona = systemPrompt.ifBlank { DEFAULT_PROMPT }
-        val system = if (userName.isBlank()) persona else "$persona\nO usuário se chama $userName."
+        val withName = if (userName.isBlank()) persona else "$persona\nO usuário se chama $userName."
+        val system = if (extraInstructions.isBlank()) withName else "$withName\n\n$extraInstructions"
         val messages = JSONArray().put(JSONObject().put("role", "system").put("content", system))
-        history.forEach { turn ->
+        // Só a imagem mais recente vai junto, para não pesar a conversa; as antigas viram uma nota.
+        val lastImage = history.indexOfLast { it.imagePath != null }
+        history.forEachIndexed { i, turn ->
             val role = if (turn.role == Role.USER) "user" else "assistant"
-            messages.put(JSONObject().put("role", role).put("content", turn.text))
+            val image = if (i == lastImage) turn.imagePath?.let(::imageDataUrl) else null
+            val content: Any = when {
+                image != null -> JSONArray()
+                    .put(JSONObject().put("type", "text").put("text", turn.text))
+                    .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", image)))
+                turn.imagePath != null -> "${turn.text}\n(imagem enviada anteriormente)"
+                else -> turn.text
+            }
+            messages.put(JSONObject().put("role", role).put("content", content))
         }
         val chosen = model.ifBlank { FREE_MODEL }
         val body = JSONObject()
@@ -89,6 +103,11 @@ class OpenRouterService(
             conn.disconnect()
         }
     }
+
+    private fun imageDataUrl(path: String): String? = runCatching {
+        val bytes = File(path).readBytes()
+        "data:image/jpeg;base64," + java.util.Base64.getEncoder().encodeToString(bytes)
+    }.getOrNull()
 
     /**
      * Confere a chave no OpenRouter (GET /auth/key) antes de salvar.
