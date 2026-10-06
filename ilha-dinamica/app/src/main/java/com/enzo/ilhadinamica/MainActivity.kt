@@ -51,7 +51,7 @@ class MainActivity : Activity() {
         web.loadUrl("file:///android_asset/panel.html")
 
         // Primeira abertura: se tudo já estiver liberado, liga a ilha direto.
-        if (prefs.enabled && Settings.canDrawOverlays(this) && IslandService.instance == null) {
+        if (prefs.enabled && Island.current == null && (IslandA11y.instance != null || Settings.canDrawOverlays(this))) {
             IslandService.start(this)
         }
     }
@@ -59,7 +59,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         runCatching { web.evaluateJavascript("window.panel&&panel.refresh()", null) }
-        IslandService.instance?.let {
+        Island.current?.let {
             it.refreshMedia()
             it.pushCalendar()
         }
@@ -75,7 +75,7 @@ class MainActivity : Activity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        IslandService.instance?.pushCalendar()
+        Island.current?.pushCalendar()
         runCatching { web.evaluateJavascript("window.panel&&panel.refresh()", null) }
     }
 
@@ -88,20 +88,21 @@ class MainActivity : Activity() {
     private fun granted(p: String) = checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
 
     private fun cmd(o: JSONObject) {
-        IslandService.send(o)
+        Island.send(o)
     }
 
     inner class Bridge {
         @JavascriptInterface
         fun getState(): String {
-            val st = runCatching { JSONObject(IslandService.lastState) }.getOrDefault(JSONObject())
+            val st = runCatching { JSONObject(Island.lastState) }.getOrDefault(JSONObject())
             return JSONObject()
                 .put("overlay", Settings.canDrawOverlays(this@MainActivity))
                 .put("notif", notifAccess())
                 .put("calendar", granted(Manifest.permission.READ_CALENDAR))
                 .put("write", Settings.System.canWrite(this@MainActivity))
                 .put("post", Build.VERSION.SDK_INT < 33 || granted(Manifest.permission.POST_NOTIFICATIONS))
-                .put("running", IslandService.instance != null)
+                .put("running", Island.current != null)
+                .put("a11y", IslandA11y.instance != null)
                 .put("enabled", prefs.enabled)
                 .put("tab", st.optString("tab", "music"))
                 .put("open", st.optBoolean("open", false))
@@ -129,6 +130,17 @@ class MainActivity : Activity() {
         }
 
         @JavascriptInterface
+        fun requestA11y() = runOnUiThread {
+            runCatching { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+        }
+
+        /** Android 13+: apps instalados por APK precisam de "Permitir configurações restritas" aqui. */
+        @JavascriptInterface
+        fun openAppInfo() = runOnUiThread {
+            runCatching { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) }
+        }
+
+        @JavascriptInterface
         fun requestCalendar() = runOnUiThread {
             requestPermissions(arrayOf(Manifest.permission.READ_CALENDAR), 2)
         }
@@ -141,7 +153,7 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun setEnabled(on: Boolean) = runOnUiThread {
             if (on) {
-                if (!Settings.canDrawOverlays(this@MainActivity)) {
+                if (IslandA11y.instance == null && !Settings.canDrawOverlays(this@MainActivity)) {
                     requestOverlay()
                     return@runOnUiThread
                 }
@@ -149,7 +161,7 @@ class MainActivity : Activity() {
                     requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
                 }
                 prefs.enabled = true
-                if (IslandService.instance == null) IslandService.start(this@MainActivity)
+                if (Island.current == null) IslandService.start(this@MainActivity)
             } else {
                 prefs.enabled = false
                 IslandService.stop(this@MainActivity)
@@ -165,20 +177,20 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun setScale(v: Float) {
             prefs.scale = v
-            IslandService.instance?.reconfigure()
+            Island.current?.reconfigure()
         }
 
         @JavascriptInterface
         fun setBubbleScale(v: Float) {
             prefs.bubbleScale = v
-            IslandService.instance?.reconfigure()
+            Island.current?.reconfigure()
         }
 
         @JavascriptInterface
         fun setOffset(dx: Float, dy: Float) {
             prefs.offsetX = dx
             prefs.offsetY = dy
-            IslandService.instance?.reconfigure()
+            Island.current?.reconfigure()
         }
 
         @JavascriptInterface

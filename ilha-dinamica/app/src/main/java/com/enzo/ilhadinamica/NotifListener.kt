@@ -42,7 +42,7 @@ class NotifListener : NotificationListenerService() {
     }
 
     override fun onListenerConnected() {
-        IslandService.instance?.refreshMedia()
+        Island.current?.refreshMedia()
     }
 
     override fun onListenerDisconnected() {
@@ -55,7 +55,7 @@ class NotifListener : NotificationListenerService() {
     }
 
     private fun handle(sbn: StatusBarNotification) {
-        val svc = IslandService.instance ?: return
+        val svc = Island.current ?: return
         val n = sbn.notification ?: return
         Log.d(TAG, "notificação de ${sbn.packageName}")
         if (n.category == Notification.CATEGORY_TRANSPORT) {
