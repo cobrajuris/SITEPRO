@@ -8,6 +8,8 @@ import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Bundle
 import android.text.Editable
 import android.text.InputType
@@ -79,7 +81,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         window.statusBarColor = C.NIGHT
         window.navigationBarColor = C.NIGHT
-        chat = ChatController(ChatStore(this))
+        chat = ChatController(ChatStore(this)) { isOnline() }
 
         root = FrameLayout(this).apply { setBackgroundColor(C.NIGHT) }
         mainView = buildMain()
@@ -177,7 +179,7 @@ class MainActivity : Activity() {
             setPadding(dp(14), dp(12), dp(14), dp(12))
             visibility = View.GONE
             setOnClickListener {
-                val needsKey = chat.apiKey.isBlank()
+                val needsKey = !chat.hasValidApiKey
                 chat.clearError()
                 if (needsKey) showSettings(true)
             }
@@ -303,15 +305,20 @@ class MainActivity : Activity() {
         val nameField = field("Como o Nero deve te chamar")
         body.addView(card("Seu nome", nameField))
 
+        val currentKeyLabel = text("", 13f, C.GOLD).apply { setPadding(0, 0, 0, dp(8)) }
         val keyField = field("sk-or-...").apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             transformationMethod = PasswordTransformationMethod.getInstance()
         }
         body.addView(card(
             "Chave de API do OpenRouter",
+            currentKeyLabel,
             keyField,
-            text("Crie a sua grátis em openrouter.ai/keys. Ela fica salva só neste aparelho.", 13f, C.MUTED)
-                .apply { setPadding(0, dp(8), 0, 0) },
+            text(
+                "Crie a sua grátis em openrouter.ai/keys. O Nero confere a chave antes de salvar e " +
+                    "guarda ela criptografada só neste aparelho. Deixe em branco para manter a atual.",
+                13f, C.MUTED,
+            ).apply { setPadding(0, dp(8), 0, 0) },
         ))
 
         val modelField = field(OpenRouterService.FREE_MODEL)
@@ -341,6 +348,29 @@ class MainActivity : Activity() {
             ).apply { setPadding(0, dp(10), 0, 0) },
         ))
 
+        val promptField = field("").apply {
+            isSingleLine = false
+            minLines = 4
+            maxLines = 10
+            gravity = Gravity.TOP or Gravity.START
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        }
+        body.addView(card(
+            "Personalidade do Nero",
+            promptField,
+            LinearLayout(this).apply {
+                setPadding(0, dp(10), 0, 0)
+                addView(text("Restaurar padrão", 14f, C.EYE).apply {
+                    background = rounded(C.TEAL, 14)
+                    setPadding(dp(14), dp(8), dp(14), dp(8))
+                    setOnClickListener { promptField.setText(OpenRouterService.DEFAULT_PROMPT) }
+                })
+            },
+            text("Instruções que o Nero segue em todas as conversas: jeito de falar, idioma, foco.", 13f, C.MUTED)
+                .apply { setPadding(0, dp(10), 0, 0) },
+        ))
+
         val deepSwitch = Switch(this).apply {
             thumbTintList = ColorStateList(
                 arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
@@ -363,14 +393,29 @@ class MainActivity : Activity() {
         }
         body.addView(card("Modo profundo", deepRow))
 
-        body.addView(pillButton("Salvar") {
-            chat.saveSettings(keyField.text.toString(), nameField.text.toString(), modelField.text.toString())
+        lateinit var saveButton: TextView
+        saveButton = pillButton("Salvar") {
             hideKeyboard()
-            Toast.makeText(this, "Salvo", Toast.LENGTH_SHORT).show()
-            showSettings(false)
-        }, LinearLayout.LayoutParams(MATCH, dp(52)).apply { topMargin = dp(8) })
+            val checkingKey = keyField.text.isNotBlank()
+            if (checkingKey) {
+                saveButton.isEnabled = false
+                saveButton.text = "Conferindo chave…"
+            }
+            chat.saveSettings(
+                keyField.text.toString(),
+                nameField.text.toString(),
+                modelField.text.toString(),
+                promptField.text.toString(),
+            ) { ok, message ->
+                saveButton.isEnabled = true
+                saveButton.text = "Salvar"
+                Toast.makeText(this, message, if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG).show()
+                if (ok) showSettings(false)
+            }
+        }
+        body.addView(saveButton, LinearLayout.LayoutParams(MATCH, dp(52)).apply { topMargin = dp(8) })
 
-        body.addView(text("Nero 1.2 · movido pelo OpenRouter", 12f, C.MUTED).apply {
+        body.addView(text("Nero 1.3 · movido pelo OpenRouter", 12f, C.MUTED).apply {
             gravity = Gravity.CENTER
             setPadding(0, dp(28), 0, 0)
         }, LinearLayout.LayoutParams(MATCH, WRAP))
@@ -379,7 +424,10 @@ class MainActivity : Activity() {
 
         page.tag = { // atualiza os campos ao abrir
             nameField.setText(chat.userName)
-            keyField.setText(chat.apiKey)
+            keyField.setText("")
+            currentKeyLabel.text = chat.apiKey.takeIf { chat.hasValidApiKey }
+                ?.let { "Chave atual: sk-or-…${it.takeLast(4)}" } ?: "Nenhuma chave configurada"
+            promptField.setText(chat.systemPrompt)
             modelField.setText(chat.model)
             deepSwitch.isChecked = chat.deepMode
         }
@@ -496,7 +544,7 @@ class MainActivity : Activity() {
         })
         addView(text("Em que posso ajudar hoje?", 16f, C.MUTED).apply { setPadding(0, 0, 0, dp(28)) })
 
-        if (chat.apiKey.isBlank()) {
+        if (!chat.hasValidApiKey) {
             val activate = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
                 background = rounded(C.TEAL, 20)
@@ -624,6 +672,12 @@ class MainActivity : Activity() {
         drawerOpen = false
         scrim.animate().alpha(0f).setDuration(200).withEndAction { scrim.visibility = View.GONE }.start()
         drawer.animate().translationX(-drawer.width.toFloat()).setDuration(240).start()
+    }
+
+    private fun isOnline(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
     private fun scrollToEnd() = scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }

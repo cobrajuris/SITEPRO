@@ -14,7 +14,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Estado e regras do chat. A tela observa via [onChange]; tudo aqui roda na thread principal,
  * exceto a chamada ao OpenRouter, que vai para uma thread de fundo.
  */
-class ChatController(private val store: ChatStore) {
+class ChatController(
+    private val store: ChatStore,
+    private val isOnline: () -> Boolean = { true },
+) {
 
     private val main = Handler(Looper.getMainLooper())
     private var service: OpenRouterService? = null
@@ -34,16 +37,53 @@ class ChatController(private val store: ChatStore) {
         private set
 
     val apiKey get() = store.apiKey
+    val hasValidApiKey get() = store.hasValidApiKey
+    val systemPrompt get() = store.systemPrompt
     val userName get() = store.userName
     val model get() = store.model
     val deepMode get() = store.deepMode
     val isBusy get() = streamingText != null
 
-    fun saveSettings(key: String, name: String, model: String) {
-        store.apiKey = key
+    /**
+     * Salva os ajustes. Se [newKey] vier preenchida, ela é conferida no OpenRouter antes de ser
+     * guardada; [onDone] recebe a mensagem para mostrar e se deu certo.
+     */
+    fun saveSettings(
+        newKey: String,
+        name: String,
+        model: String,
+        prompt: String,
+        onDone: (ok: Boolean, message: String) -> Unit,
+    ) {
         store.userName = name
         store.model = model.ifBlank { OpenRouterService.FREE_MODEL }
-        onChange()
+        store.systemPrompt = prompt
+        val key = newKey.trim()
+        if (key.isEmpty()) {
+            onChange()
+            onDone(true, "Ajustes salvos")
+            return
+        }
+        if (!isOnline()) {
+            onDone(false, "Sem internet para conferir a chave. Conecte-se e tente de novo.")
+            return
+        }
+        Thread {
+            val result = try {
+                val free = OpenRouterService(key).validateKey()
+                true to if (free) "Chave válida (plano grátis). Tudo pronto!" else "Chave válida. Tudo pronto!"
+            } catch (e: Exception) {
+                false to ((e as? NeroException)?.message ?: "Não consegui conferir a chave.")
+            }
+            main.post {
+                if (result.first) {
+                    store.apiKey = key
+                    error = null
+                }
+                onChange()
+                onDone(result.first, result.second)
+            }
+        }.start()
     }
 
     fun toggleDeepMode() {
@@ -80,8 +120,13 @@ class ChatController(private val store: ChatStore) {
     fun send(text: String) {
         val clean = text.trim()
         if (clean.isEmpty() || isBusy) return
-        if (apiKey.isBlank()) {
-            error = "Adicione sua chave de API em Ajustes para conversar com o Nero."
+        if (!hasValidApiKey) {
+            error = "Adicione sua chave do OpenRouter em Ajustes para conversar com o Nero."
+            onChange()
+            return
+        }
+        if (!isOnline()) {
+            error = "Sem internet. Verifique sua conexão e tente de novo."
             onChange()
             return
         }
@@ -126,10 +171,11 @@ class ChatController(private val store: ChatStore) {
         val chosenModel = model
         val deep = deepMode
         val name = userName
+        val prompt = systemPrompt
         Thread {
             val buffer = StringBuilder()
             try {
-                svc.streamReply(history, chosenModel, deep, name, { cancelled.get() }) { piece ->
+                svc.streamReply(history, chosenModel, deep, name, prompt, { cancelled.get() }) { piece ->
                     buffer.append(piece)
                     val snapshot = buffer.toString()
                     main.post {
