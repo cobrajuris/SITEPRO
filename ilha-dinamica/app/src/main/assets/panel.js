@@ -2,8 +2,8 @@
   'use strict';
   const { html, render, Component } = window.htmPreact;
   const A = window.Android || {
-    getState: () => JSON.stringify({ overlay: false, notif: false, calendar: false, write: false, post: true, running: false, enabled: false, tab: 'music', open: false, scale: 1, bscale: 1, dx: 0, dy: 0, real: true }),
-    requestOverlay() {}, requestNotifAccess() {}, requestCalendar() {}, requestWrite() {},
+    getState: () => JSON.stringify({ a11y: false, overlay: false, notif: false, calendar: false, write: false, post: true, running: false, enabled: false, tab: 'music', open: false, scale: 1, bscale: 1, dx: 0, dy: 0, real: true }),
+    requestA11y() {}, openAppInfo() {}, requestOverlay() {}, requestNotifAccess() {}, requestCalendar() {}, requestWrite() {},
     setEnabled() {}, setTab() {}, setOpen() {}, setScale() {}, setBubbleScale() {}, setOffset() {}, setReal() {}
   };
   const TABS = [['music', 'Música'], ['timer', 'Timer'], ['bright', 'Brilho'], ['assist', 'Assistente'], ['cal', 'Calendário'], ['ig', 'Instagram'], ['wa', 'WhatsApp'], ['tg', 'Telegram'], ['tt', 'TikTok'], ['call', 'Chamada'], ['yt', 'YouTube'], ['ifood', 'iFood'], ['maps', 'Maps'], ['file', 'Enviar arquivo']];
@@ -69,7 +69,13 @@
 
         <div class="sec">
           <div class="lbl">Permissões</div>
-          ${this.perm(s.overlay, 'Aparecer sobre outros apps', 'Necessária para desenhar a bolha em volta da câmera.', () => A.requestOverlay())}
+          ${this.perm(s.a11y, 'Acessibilidade (recomendado)', 'Deixa a bolha por cima da barra de status, para você tocar nela em volta da câmera, e mantém a ilha sempre ativa, como de fábrica. A Ilha não lê sua tela.', () => A.requestA11y())}
+          ${!s.a11y ? html`<div style="font-size:12.5px;color:#5C6066;line-height:1.45;padding:0 4px">
+              Se a opção aparecer bloqueada (Android 13 ou mais novo), abra as
+              <button class="cb" onClick=${() => A.openAppInfo()} style="background:none;padding:0;color:#17181A;font-weight:800;text-decoration:underline">informações do app</button>,
+              toque nos 3 pontinhos ⋮ e em “Permitir configurações restritas”. Depois ative “Ilha Dinâmica” na Acessibilidade.
+            </div>` : null}
+          ${this.perm(s.overlay, 'Aparecer sobre outros apps', s.a11y ? 'Opcional com a acessibilidade ativa.' : 'Alternativa se você não quiser usar a acessibilidade (a bolha pode não receber toque em alguns celulares).', () => A.requestOverlay(), s.a11y)}
           ${this.perm(s.notif, 'Acesso às notificações', 'Mostra mensagens reais (WhatsApp, Instagram, Telegram, TikTok, iFood, Maps) e a música que está tocando.', () => A.requestNotifAccess())}
           ${this.perm(s.calendar, 'Calendário', 'Mostra os eventos da sua semana na aba Calendário.', () => A.requestCalendar(), true)}
           ${this.perm(s.write, 'Alterar brilho', 'Deixa a aba Brilho mudar o brilho de verdade.', () => A.requestWrite(), true)}
