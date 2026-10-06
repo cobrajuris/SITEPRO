@@ -5,19 +5,19 @@ import android.os.Looper
 import com.nero.assistant.data.ChatStore
 import com.nero.assistant.data.ChatTurn
 import com.nero.assistant.data.Conversation
-import com.nero.assistant.data.GroqService
 import com.nero.assistant.data.NeroException
+import com.nero.assistant.data.OpenRouterService
 import com.nero.assistant.data.Role
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Estado e regras do chat. A tela observa via [onChange]; tudo aqui roda na thread principal,
- * exceto a chamada à Groq, que vai para uma thread de fundo.
+ * exceto a chamada ao OpenRouter, que vai para uma thread de fundo.
  */
 class ChatController(private val store: ChatStore) {
 
     private val main = Handler(Looper.getMainLooper())
-    private var service: GroqService? = null
+    private var service: OpenRouterService? = null
     private var serviceKey: String? = null
     private var cancelFlag = AtomicBoolean(false)
 
@@ -35,12 +35,14 @@ class ChatController(private val store: ChatStore) {
 
     val apiKey get() = store.apiKey
     val userName get() = store.userName
+    val model get() = store.model
     val deepMode get() = store.deepMode
     val isBusy get() = streamingText != null
 
-    fun saveSettings(key: String, name: String) {
+    fun saveSettings(key: String, name: String, model: String) {
         store.apiKey = key
         store.userName = name
+        store.model = model.ifBlank { OpenRouterService.FREE_MODEL }
         onChange()
     }
 
@@ -121,12 +123,13 @@ class ChatController(private val store: ChatStore) {
         val history = current.turns
         val conversationId = current.id
         val svc = serviceFor(apiKey)
+        val chosenModel = model
         val deep = deepMode
         val name = userName
         Thread {
             val buffer = StringBuilder()
             try {
-                svc.streamReply(history, deep, name, { cancelled.get() }) { piece ->
+                svc.streamReply(history, chosenModel, deep, name, { cancelled.get() }) { piece ->
                     buffer.append(piece)
                     val snapshot = buffer.toString()
                     main.post {
@@ -170,9 +173,9 @@ class ChatController(private val store: ChatStore) {
         store.saveConversations(conversations)
     }
 
-    private fun serviceFor(key: String): GroqService {
+    private fun serviceFor(key: String): OpenRouterService {
         if (service == null || serviceKey != key) {
-            service = GroqService(key)
+            service = OpenRouterService(key)
             serviceKey = key
         }
         return service!!

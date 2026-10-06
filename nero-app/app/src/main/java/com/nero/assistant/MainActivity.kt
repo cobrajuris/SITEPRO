@@ -27,6 +27,7 @@ import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import com.nero.assistant.data.ChatStore
+import com.nero.assistant.data.OpenRouterService
 import com.nero.assistant.data.Role
 
 /** Paleta tirada da logo: fundo petróleo, gato preto, olhos brancos. */
@@ -302,15 +303,42 @@ class MainActivity : Activity() {
         val nameField = field("Como o Nero deve te chamar")
         body.addView(card("Seu nome", nameField))
 
-        val keyField = field("gsk_...").apply {
+        val keyField = field("sk-or-...").apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             transformationMethod = PasswordTransformationMethod.getInstance()
         }
         body.addView(card(
-            "Chave de API da Groq",
+            "Chave de API do OpenRouter",
             keyField,
-            text("Crie a sua grátis em console.groq.com/keys. Ela fica salva só neste aparelho.", 13f, C.MUTED)
+            text("Crie a sua grátis em openrouter.ai/keys. Ela fica salva só neste aparelho.", 13f, C.MUTED)
                 .apply { setPadding(0, dp(8), 0, 0) },
+        ))
+
+        val modelField = field(OpenRouterService.FREE_MODEL)
+        val presets = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(10), 0, 0)
+            listOf(
+                "Grátis" to OpenRouterService.FREE_MODEL,
+                "Automático" to OpenRouterService.AUTO_MODEL,
+            ).forEach { (label, id) ->
+                addView(text(label, 14f, C.EYE).apply {
+                    background = rounded(C.TEAL, 14)
+                    setPadding(dp(14), dp(8), dp(14), dp(8))
+                    setOnClickListener { modelField.setText(id) }
+                }, LinearLayout.LayoutParams(WRAP, WRAP).apply { marginEnd = dp(8) })
+            }
+        }
+        body.addView(card(
+            "Modelo de IA",
+            modelField,
+            presets,
+            text(
+                "Grátis: usa um modelo gratuito disponível. Automático: o OpenRouter escolhe o melhor " +
+                    "para cada pergunta (usa créditos). Você também pode digitar qualquer modelo, como " +
+                    "anthropic/claude-sonnet-4.5. Se ele falhar, o Nero usa o grátis.",
+                13f, C.MUTED,
+            ).apply { setPadding(0, dp(10), 0, 0) },
         ))
 
         val deepSwitch = Switch(this).apply {
@@ -336,13 +364,13 @@ class MainActivity : Activity() {
         body.addView(card("Modo profundo", deepRow))
 
         body.addView(pillButton("Salvar") {
-            chat.saveSettings(keyField.text.toString(), nameField.text.toString())
+            chat.saveSettings(keyField.text.toString(), nameField.text.toString(), modelField.text.toString())
             hideKeyboard()
             Toast.makeText(this, "Salvo", Toast.LENGTH_SHORT).show()
             showSettings(false)
         }, LinearLayout.LayoutParams(MATCH, dp(52)).apply { topMargin = dp(8) })
 
-        body.addView(text("Nero 1.1 · movido pela Groq", 12f, C.MUTED).apply {
+        body.addView(text("Nero 1.2 · movido pelo OpenRouter", 12f, C.MUTED).apply {
             gravity = Gravity.CENTER
             setPadding(0, dp(28), 0, 0)
         }, LinearLayout.LayoutParams(MATCH, WRAP))
@@ -352,6 +380,7 @@ class MainActivity : Activity() {
         page.tag = { // atualiza os campos ao abrir
             nameField.setText(chat.userName)
             keyField.setText(chat.apiKey)
+            modelField.setText(chat.model)
             deepSwitch.isChecked = chat.deepMode
         }
         return page
@@ -474,7 +503,7 @@ class MainActivity : Activity() {
                 setPadding(dp(18), dp(18), dp(18), dp(18))
                 setOnClickListener { showSettings(true) }
                 addView(text("Ative o Nero", 16f, C.GOLD, bold = true))
-                addView(text("Toque aqui e cole sua chave de API da Groq para começar.", 14f, C.EYE)
+                addView(text("Toque aqui e cole sua chave do OpenRouter para começar. Dá para usar de graça.", 14f, C.EYE)
                     .apply { setPadding(0, dp(4), 0, 0) })
             }
             addView(activate, LinearLayout.LayoutParams(MATCH, WRAP))
