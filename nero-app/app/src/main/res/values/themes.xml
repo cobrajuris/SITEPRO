@@ -2,7 +2,8 @@
 <resources>
     <style name="Theme.Nero" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/nero_night</item>
-        <item name="android:statusBarColor">@color/nero_night</item>
+        <item name="android:statusBarColor">@color/nero_olive</item>
         <item name="android:navigationBarColor">@color/nero_night</item>
+        <item name="android:colorAccent">#E4CDF7</item>
     </style>
 </resources>

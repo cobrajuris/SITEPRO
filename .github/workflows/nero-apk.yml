@@ -28,6 +28,9 @@ jobs:
       - name: Restore image assets
         run: bash restore-assets.sh
 
+      - name: Fetch fonts
+        run: bash fetch-fonts.sh
+
       - name: Build APK
         run: gradle assembleRelease --no-daemon --stacktrace
 

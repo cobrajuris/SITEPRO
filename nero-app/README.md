@@ -16,6 +16,8 @@ App Android nativo (Kotlin, componentes nativos do Android) com a identidade do 
 - Copiar e refazer respostas, blocos de código destacados
 - Sugestões rápidas na tela inicial, splash animada com a logo
 - Ícone adaptativo gerado a partir da logo
+- Visual de vidro fosco com fundo orgânico animado, degradê água → pêssego → lilás e
+  tipografia Urbanist + Doto (matriz de pontos), inspirado nas referências Notis+/MyNotes
 
 ## Como obter o APK
 Cada push que altera `nero-app/` dispara o workflow **Nero APK** no GitHub Actions.
@@ -32,5 +34,6 @@ recrie-as antes de compilar:
 ```
 cd nero-app
 ./restore-assets.sh
+./fetch-fonts.sh
 gradle assembleRelease
 ```

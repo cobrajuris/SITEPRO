@@ -7,3 +7,4 @@ local.properties
 
 # Gerados por restore-assets.sh
 app/src/main/res/**/*.webp
+app/src/main/res/font/*.ttf

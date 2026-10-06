@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="nero_bg">#1C353A</color>
-    <color name="nero_night">#0E1B1E</color>
+    <color name="nero_night">#1F2412</color>
+    <color name="nero_olive">#3C4524</color>
 </resources>
