@@ -7,6 +7,9 @@ import com.nero.assistant.data.ChatTurn
 import com.nero.assistant.data.Conversation
 import com.nero.assistant.data.NeroException
 import com.nero.assistant.data.OpenRouterService
+import com.nero.assistant.data.Reminder
+import com.nero.assistant.data.ReminderParser
+import com.nero.assistant.data.ReminderStore
 import com.nero.assistant.data.Role
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -16,7 +19,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class ChatController(
     private val store: ChatStore,
+    val reminders: ReminderStore,
     private val isOnline: () -> Boolean = { true },
+    /** Chamado quando a IA cria um lembrete, para agendar o alarme. */
+    private val onReminderCreated: (Reminder) -> Unit = {},
 ) {
 
     private val main = Handler(Looper.getMainLooper())
@@ -34,6 +40,9 @@ class ChatController(
     var streamingText: String? = null
         private set
     var error: String? = null
+        private set
+    /** Foto escolhida pelo usuário que vai junto com a próxima mensagem. */
+    var pendingImage: String? = null
         private set
 
     val apiKey get() = store.apiKey
@@ -112,13 +121,29 @@ class ChatController(
         onChange()
     }
 
+    fun attachImage(path: String) {
+        pendingImage = path
+        onChange()
+    }
+
+    fun clearImage() {
+        pendingImage = null
+        onChange()
+    }
+
+    fun deleteReminder(id: Long) {
+        reminders.remove(id)
+        onChange()
+    }
+
     fun clearError() {
         error = null
         onChange()
     }
 
     fun send(text: String) {
-        val clean = text.trim()
+        val image = pendingImage
+        val clean = text.trim().ifEmpty { if (image != null) "O que tem nesta imagem?" else "" }
         if (clean.isEmpty() || isBusy) return
         if (!hasValidApiKey) {
             error = "Adicione sua chave do OpenRouter em Ajustes para conversar com o Nero."
@@ -133,9 +158,10 @@ class ChatController(
         val title = if (current.turns.isEmpty()) clean.take(40) else current.title
         current = current.copy(
             title = title,
-            turns = current.turns + ChatTurn(Role.USER, clean),
+            turns = current.turns + ChatTurn(Role.USER, clean, image),
             updatedAt = System.currentTimeMillis(),
         )
+        pendingImage = null
         persist()
         respond()
     }
@@ -154,7 +180,7 @@ class ChatController(
         cancelFlag.set(true)
         val partial = streamingText
         streamingText = null
-        if (!partial.isNullOrBlank()) commitReply(partial)
+        if (!partial.isNullOrBlank()) commitReply(ReminderParser.hidePartial(partial))
         onChange()
     }
 
@@ -165,7 +191,15 @@ class ChatController(
         streamingText = ""
         onChange()
 
-        val history = current.turns
+        // O modelo vê os lembretes já criados como uma frase, sem as marcações internas.
+        val history = current.turns.map { turn ->
+            val ids = ReminderParser.tokenIds(turn.text)
+            if (ids.isEmpty()) turn else turn.copy(
+                text = ReminderParser.stripTokens(turn.text) + ids.joinToString("") { id ->
+                    reminders.get(id)?.let { "\n(Lembrete criado: ${it.title}, ${ReminderParser.describe(it.timeMillis)})" } ?: ""
+                }
+            )
+        }
         val conversationId = current.id
         val svc = serviceFor(apiKey)
         val chosenModel = model
@@ -175,7 +209,7 @@ class ChatController(
         Thread {
             val buffer = StringBuilder()
             try {
-                svc.streamReply(history, chosenModel, deep, name, prompt, { cancelled.get() }) { piece ->
+                svc.streamReply(history, chosenModel, deep, name, prompt, ReminderParser.instructions(), { cancelled.get() }) { piece ->
                     buffer.append(piece)
                     val snapshot = buffer.toString()
                     main.post {
@@ -205,7 +239,16 @@ class ChatController(
         }.start()
     }
 
-    private fun commitReply(text: String) {
+    private fun commitReply(raw: String) {
+        // Se a IA pediu um lembrete, cria e agenda, e deixa uma marca no texto para a tela mostrar o cartão.
+        val (clean, request) = ReminderParser.extract(raw)
+        val text = if (request != null) {
+            val reminder = reminders.add(request.title, request.timeMillis)
+            onReminderCreated(reminder)
+            clean + "\n" + ReminderParser.token(reminder.id)
+        } else {
+            ReminderParser.hidePartial(clean)
+        }
         current = current.copy(
             turns = current.turns + ChatTurn(Role.ASSISTANT, text),
             updatedAt = System.currentTimeMillis(),
