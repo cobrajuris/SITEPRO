@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Ilha Dinâmica</string>
+    <string name="channel_name">Ilha ativa</string>
+    <string name="notif_title">Ilha dinâmica ligada</string>
+    <string name="notif_text">Toque na bolha em volta da câmera para abrir a cápsula.</string>
+    <string name="notif_stop">Desligar</string>
+</resources>
