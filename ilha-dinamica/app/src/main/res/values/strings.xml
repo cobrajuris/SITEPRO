@@ -5,4 +5,6 @@
     <string name="notif_title">Ilha dinâmica ligada</string>
     <string name="notif_text">Toque na bolha em volta da câmera para abrir a cápsula.</string>
     <string name="notif_stop">Desligar</string>
+    <string name="a11y_summary">Bolha em volta da câmera que você toca por cima da barra de status, como uma ilha de fábrica.</string>
+    <string name="a11y_description">A Ilha Dinâmica usa a acessibilidade só para desenhar a bolha e a cápsula por cima da barra de status, onde fica a câmera, e para continuar ativa sem ser fechada pelo sistema. Ela não lê o conteúdo da tela, não vê o que você digita e não toca em nada por você.</string>
 </resources>
