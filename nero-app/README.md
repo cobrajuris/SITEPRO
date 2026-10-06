@@ -6,6 +6,8 @@ App Android nativo (Kotlin, componentes nativos do Android) com a identidade do 
 - Chat com respostas em tempo real (streaming) e botão de parar
 - Qualquer modelo do OpenRouter: grátis (`openrouter/free`, padrão), automático (`openrouter/auto`) ou um ID digitado, com o grátis como reserva
 - **Modo profundo**: pede raciocínio alto ao modelo antes de responder
+- Personalidade editável (system prompt) em Ajustes
+- Chave conferida no OpenRouter antes de salvar e guardada criptografada (Android Keystore)
 - Histórico de conversas salvo no aparelho, com menu lateral
 - Copiar e refazer respostas, blocos de código destacados
 - Sugestões rápidas na tela inicial, splash animada com a logo

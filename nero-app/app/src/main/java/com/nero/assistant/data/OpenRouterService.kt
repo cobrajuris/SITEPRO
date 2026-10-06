@@ -33,10 +33,12 @@ class OpenRouterService(
         model: String,
         deepMode: Boolean,
         userName: String,
+        systemPrompt: String,
         isCancelled: () -> Boolean,
         onText: (String) -> Unit,
     ) {
-        val system = if (userName.isBlank()) SYSTEM_PROMPT else "$SYSTEM_PROMPT\nO usuário se chama $userName."
+        val persona = systemPrompt.ifBlank { DEFAULT_PROMPT }
+        val system = if (userName.isBlank()) persona else "$persona\nO usuário se chama $userName."
         val messages = JSONArray().put(JSONObject().put("role", "system").put("content", system))
         history.forEach { turn ->
             val role = if (turn.role == Role.USER) "user" else "assistant"
@@ -51,20 +53,12 @@ class OpenRouterService(
         if (chosen != FREE_MODEL) body.put("models", JSONArray().put(chosen).put(FREE_MODEL))
         if (deepMode) body.put("reasoning", JSONObject().put("effort", "high"))
 
-        val conn = try {
-            (URL("$baseUrl/chat/completions").openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                connectTimeout = 15_000
-                readTimeout = 120_000
-                doOutput = true
-                setRequestProperty("Authorization", "Bearer $apiKey")
-                setRequestProperty("Content-Type", "application/json")
-                setRequestProperty("Accept", "text/event-stream")
-                setRequestProperty("HTTP-Referer", "https://github.com/cobrajuris/SITEPRO")
-                setRequestProperty("X-Title", "Nero")
-            }
-        } catch (e: IOException) {
-            throw NeroException("Sem conexão. Verifique sua internet.", e)
+        val conn = open("chat/completions").apply {
+            requestMethod = "POST"
+            readTimeout = 120_000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json")
+            setRequestProperty("Accept", "text/event-stream")
         }
 
         try {
@@ -96,6 +90,38 @@ class OpenRouterService(
         }
     }
 
+    /**
+     * Confere a chave no OpenRouter (GET /auth/key) antes de salvar.
+     * Devolve true se a conta está no plano grátis. Lança [NeroException] se a chave não serve.
+     */
+    fun validateKey(): Boolean {
+        if (!apiKey.startsWith(KEY_PREFIX)) throw NeroException("A chave do OpenRouter começa com \"$KEY_PREFIX\".")
+        val conn = open("auth/key").apply { requestMethod = "GET" }
+        try {
+            val status = conn.responseCode
+            if (status !in 200..299) throw httpError(status, conn)
+            val text = conn.inputStream.bufferedReader().use { it.readText() }
+            return runCatching { JSONObject(text).optJSONObject("data")?.optBoolean("is_free_tier") }
+                .getOrNull() ?: false
+        } catch (e: IOException) {
+            throw NeroException("Sem conexão. Verifique sua internet.", e)
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun open(path: String): HttpURLConnection = try {
+        (URL("$baseUrl/$path").openConnection() as HttpURLConnection).apply {
+            connectTimeout = 15_000
+            readTimeout = 30_000
+            setRequestProperty("Authorization", "Bearer $apiKey")
+            setRequestProperty("HTTP-Referer", "https://github.com/cobrajuris/SITEPRO")
+            setRequestProperty("X-Title", "Nero")
+        }
+    } catch (e: IOException) {
+        throw NeroException("Sem conexão. Verifique sua internet.", e)
+    }
+
     private fun httpError(status: Int, conn: HttpURLConnection): NeroException {
         val detail = runCatching {
             val text = conn.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
@@ -105,6 +131,7 @@ class OpenRouterService(
             401 -> NeroException("Chave do OpenRouter inválida. Confira em Ajustes.")
             402 -> NeroException("Sem créditos no OpenRouter para este modelo. Use o modelo grátis em Ajustes.")
             429 -> NeroException("Limite de uso do OpenRouter atingido. Aguarde um pouco e tente de novo.")
+            in 500..599 -> NeroException("O OpenRouter está fora do ar no momento. Tente novamente em instantes.")
             else -> NeroException(
                 "O OpenRouter respondeu com erro ($status)" + (detail?.let { ": $it" } ?: ". Tente novamente.")
             )
@@ -119,7 +146,11 @@ class OpenRouterService(
         /** Deixa o OpenRouter escolher o melhor modelo para cada pergunta (usa créditos). */
         const val AUTO_MODEL = "openrouter/auto"
 
-        private val SYSTEM_PROMPT = """
+        /** Toda chave do OpenRouter começa assim. */
+        const val KEY_PREFIX = "sk-or-"
+
+        /** Personalidade padrão do Nero; pode ser trocada em Ajustes. */
+        val DEFAULT_PROMPT = """
             Você é o Nero, um assistente pessoal premium com a personalidade de um gato preto:
             calmo, perspicaz, levemente irônico e sempre útil. Responda em português do Brasil,
             a menos que o usuário escreva em outro idioma. Seja direto e organizado: use listas

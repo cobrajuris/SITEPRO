@@ -18,9 +18,31 @@ class ChatStore(context: Context) {
     private val prefs = context.getSharedPreferences("nero_store", Context.MODE_PRIVATE)
     private val secure = context.getSharedPreferences("nero_secure", Context.MODE_PRIVATE)
 
+    /** Chave do OpenRouter, guardada criptografada com o Android Keystore. */
     var apiKey: String
-        get() = secure.getString(KEY_API, "").orEmpty()
-        set(value) = secure.edit().putString(KEY_API, value.trim()).apply()
+        get() = secure.getString(KEY_API_ENCRYPTED, null)?.let(KeyVault::decrypt).orEmpty()
+        set(value) {
+            val clean = value.trim()
+            secure.edit().apply {
+                if (clean.isEmpty()) remove(KEY_API_ENCRYPTED) else putString(KEY_API_ENCRYPTED, KeyVault.encrypt(clean))
+            }.apply()
+        }
+
+    /** Só chaves do OpenRouter contam (as antigas da Groq/Anthropic não servem mais). */
+    val hasValidApiKey get() = apiKey.startsWith(OpenRouterService.KEY_PREFIX)
+
+    /** Personalidade do Nero (system prompt). */
+    var systemPrompt: String
+        get() = prefs.getString(KEY_PROMPT, null)?.takeIf { it.isNotBlank() } ?: OpenRouterService.DEFAULT_PROMPT
+        set(value) = prefs.edit().putString(KEY_PROMPT, value.trim()).apply()
+
+    init {
+        // Versões antigas guardavam a chave em texto puro: criptografa e apaga o original.
+        secure.getString(KEY_API_PLAIN, null)?.let { old ->
+            if (old.isNotBlank()) apiKey = old
+            secure.edit().remove(KEY_API_PLAIN).apply()
+        }
+    }
 
     var deepMode: Boolean
         get() = prefs.getBoolean(KEY_DEEP, false)
@@ -73,7 +95,9 @@ class ChatStore(context: Context) {
     }
 
     private companion object {
-        const val KEY_API = "api_key"
+        const val KEY_API_PLAIN = "api_key"
+        const val KEY_API_ENCRYPTED = "api_key_enc"
+        const val KEY_PROMPT = "system_prompt"
         const val KEY_DEEP = "deep_mode"
         const val KEY_NAME = "user_name"
         const val KEY_MODEL = "model"
