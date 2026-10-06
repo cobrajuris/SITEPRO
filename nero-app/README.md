@@ -33,7 +33,7 @@ recrie-as antes de compilar:
 
 ```
 cd nero-app
-./restore-assets.sh
-./fetch-fonts.sh
+bash restore-assets.sh
+bash fetch-fonts.sh
 gradle assembleRelease
 ```
