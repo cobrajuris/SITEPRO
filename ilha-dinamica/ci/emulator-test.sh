@@ -78,12 +78,12 @@ shot 05b-bolha-duas-vezes
 step "Mensagem de grupo do WhatsApp com foto (notificação real pelo leitor)"
 cmdc "shelltest:on"
 AV="$(python3 "$HERE/avatar.py")"
-adb shell "cmd notification post -S messaging --conversation 'Família Meneses' --message 'Ana:Chegando em 10 minutos, separa a mesa!' -I data:base64,$AV familia 'Nova mensagem'" || fail "não consegui postar a notificação de teste"
+adb shell "su 2000 cmd notification post -S messaging --conversation 'Família Meneses' --message 'Ana:Chegando em 10 minutos, separa a mesa!' -I data:base64,$AV familia 'Nova mensagem'" || fail "não consegui postar a notificação de teste"
 sleep 3
 shot 06-whatsapp-grupo-com-foto
 adb logcat -d -s IlhaNotif:* | tail -5
 adb logcat -d -s IlhaNotif:I | grep -q "aba=wa foto=true" || fail "a mensagem do grupo com foto NÃO apareceu na ilha"
-adb shell "cmd notification post -I data:base64,$AV -t 'Carlos' contato 'Oi, já enviei o arquivo pra você.'" || true
+adb shell "su 2000 cmd notification post -I data:base64,$AV -t 'Carlos' contato 'Oi, já enviei o arquivo pra você.'" || true
 sleep 3
 shot 07-whatsapp-contato-com-foto
 cmdc "shelltest:off"

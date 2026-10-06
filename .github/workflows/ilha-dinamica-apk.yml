@@ -67,6 +67,16 @@ jobs:
         with:
           name: capturas-do-teste
           path: capturas-do-teste.zip
+      - name: Publicar capturas do último teste (mesmo se falhar)
+        if: always()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ilha-testes
+          name: Capturas dos testes automáticos
+          prerelease: true
+          make_latest: false
+          files: capturas-do-teste.zip
+          body: Capturas de tela e logs do último teste automático da Ilha Dinâmica no emulador Android.
 
   release:
     name: Publicar
