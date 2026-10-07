@@ -59,6 +59,7 @@ import java.util.Locale
 private val SUGGESTIONS = listOf(
     "Planeje meu dia",
     "Me lembra amanhã às 9h de beber água",
+    "O que tenho para esta semana?",
     "Escreva um e-mail profissional",
     "Explique algo de forma simples",
     "Ideias para um projeto",
@@ -68,13 +69,13 @@ private val SUGGESTIONS = listOf(
 class MainActivity : Activity() {
 
     private lateinit var chat: ChatController
-    private lateinit var fonts: NeroFonts
+    internal lateinit var fonts: NeroFonts
 
     private lateinit var root: FrameLayout
     private lateinit var mainView: LinearLayout
     private lateinit var settingsView: View
-    private lateinit var remindersView: LinearLayout
-    private lateinit var remindersList: LinearLayout
+    private lateinit var agenda: AgendaPage
+    private lateinit var remindersView: View
     private lateinit var modeLabel: TextView
     private lateinit var messages: LinearLayout
     private lateinit var scroll: ScrollView
@@ -113,7 +114,8 @@ class MainActivity : Activity() {
         root.addView(AuroraBackground(this), match())
         mainView = buildMain()
         settingsView = buildSettings().apply { visibility = View.GONE }
-        remindersView = buildReminders().apply { visibility = View.GONE }
+        agenda = AgendaPage(this, chat.reminders, onChanged = { chat.remindersChanged() }) { showPage(remindersView, false) }
+        remindersView = agenda.view.apply { visibility = View.GONE }
         scrim = View(this).apply {
             setBackgroundColor(Color.argb(150, 8, 8, 6))
             alpha = 0f
@@ -134,12 +136,35 @@ class MainActivity : Activity() {
 
         chat.onChange = {
             render()
-            if (remindersView.visibility == View.VISIBLE) renderReminders()
+            if (remindersView.visibility == View.VISIBLE) agenda.render()
         }
         render()
 
         splash.animate().setStartDelay(1500).alpha(0f).setDuration(450)
             .withEndAction { root.removeView(splash) }.start()
+        handleIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleIntent(intent)
+    }
+
+    /** Tocar na notificação de um lembrete abre direto a agenda. */
+    private fun handleIntent(intent: Intent?) {
+        if (intent?.getBooleanExtra(EXTRA_OPEN_AGENDA, false) == true) {
+            intent.removeExtra(EXTRA_OPEN_AGENDA)
+            if (drawerOpen) closeDrawer()
+            if (settingsView.visibility == View.VISIBLE) settingsView.visibility = View.GONE
+            agenda.showToday()
+            if (remindersView.visibility != View.VISIBLE) showPage(remindersView, true)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Um lembrete pode ter sido concluído pela notificação enquanto o app estava fechado.
+        if (::agenda.isInitialized && remindersView.visibility == View.VISIBLE) agenda.render()
     }
 
     @Deprecated("Back simples para Activity sem AndroidX")
@@ -370,7 +395,7 @@ class MainActivity : Activity() {
             addView(history)
         }, LinearLayout.LayoutParams(MATCH, 0, 1f))
 
-        addView(menuRow(R.drawable.ic_alarm, "Lembretes") {
+        addView(menuRow(R.drawable.ic_alarm, "Agenda") {
             closeDrawer()
             showPage(remindersView, true)
         })
@@ -492,7 +517,7 @@ class MainActivity : Activity() {
         }
         body.addView(saveButton, LinearLayout.LayoutParams(MATCH, dp(56)).apply { topMargin = dp(6) })
 
-        body.addView(dots("NERO 1.5 · OPENROUTER", 11f, N.FAINT).apply {
+        body.addView(dots("NERO 1.6 · OPENROUTER", 11f, N.FAINT).apply {
             gravity = Gravity.CENTER
             setPadding(0, dp(28), 0, 0)
         }, LinearLayout.LayoutParams(MATCH, WRAP))
@@ -512,78 +537,6 @@ class MainActivity : Activity() {
             deepSwitch.isChecked = chat.deepMode
         }
         return page
-    }
-
-    // ---------- Lembretes ----------
-
-    private fun buildReminders(): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        isClickable = true
-        addView(pageHeader("Lembretes") { showPage(remindersView, false) })
-        remindersList = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(4), dp(16), dp(24))
-        }
-        addView(ScrollView(context).apply {
-            isVerticalScrollBarEnabled = false
-            addView(remindersList)
-        }, LinearLayout.LayoutParams(MATCH, 0, 1f))
-    }
-
-    /** Lista em cartão escuro com título em pontos e linhas em pílula. */
-    private fun renderReminders() {
-        remindersList.removeAllViews()
-        val upcoming = chat.reminders.upcoming()
-        val panel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = Shapes.glass(context, 30, N.GLASS_DARK)
-            setPadding(dp(18), dp(24), dp(18), dp(18))
-        }
-        panel.addView(dots("PRÓXIMOS", 30f, N.TEXT).apply {
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, dp(18))
-        }, LinearLayout.LayoutParams(MATCH, WRAP))
-        if (upcoming.isEmpty()) {
-            panel.addView(label(
-                "Nada agendado.\n\nPeça no chat: \"me lembra amanhã às 15h de ligar para o dentista\", " +
-                    "ou mande a foto de um convite ou de uma conta para pagar.",
-                15f, N.MUTED, fonts.light,
-            ).apply {
-                gravity = Gravity.CENTER
-                setLineSpacing(0f, 1.3f)
-            })
-        }
-        upcoming.forEach { reminder -> panel.addView(reminderRow(reminder)) }
-        remindersList.addView(panel)
-    }
-
-    private fun reminderRow(reminder: Reminder): View = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        background = Shapes.solid(context, 28, Color.argb(0x55, 0, 0, 0))
-        setPadding(dp(10), dp(10), dp(10), dp(10))
-        layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) }
-        addView(ImageView(context).apply {
-            background = Shapes.circle(Color.TRANSPARENT, N.MUTED, context)
-            contentDescription = "Concluir lembrete"
-            setOnClickListener {
-                setImageResource(R.drawable.ic_check)
-                imageTintList = ColorStateList.valueOf(N.INK)
-                background = Shapes.circle(N.LILAC)
-                setPadding(dp(6), dp(6), dp(6), dp(6))
-                postDelayed({
-                    ReminderAlarms.cancel(this@MainActivity, reminder.id)
-                    chat.deleteReminder(reminder.id)
-                }, 350)
-            }
-        }, LinearLayout.LayoutParams(dp(30), dp(30)))
-        addView(LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), 0, dp(8), 0)
-            addView(label(reminder.title, 16f, N.TEXT, fonts.regular))
-            addView(dots(ReminderParser.describe(reminder.timeMillis).uppercase(Locale("pt", "BR")), 11f, N.LILAC))
-        }, LinearLayout.LayoutParams(0, WRAP, 1f))
-        addView(roundButton(R.drawable.ic_event, "Adicionar à agenda", size = 40) { addToCalendar(reminder) })
     }
 
     // ---------- Render ----------
@@ -725,6 +678,27 @@ class MainActivity : Activity() {
             setPadding(0, dp(4), 0, dp(24))
         })
 
+        // O próximo lembrete fica à vista na tela inicial; tocar abre a agenda.
+        chat.reminders.upcoming().firstOrNull()?.let { next ->
+            addView(LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = Shapes.glass(context, 26, N.GLASS_DARK)
+                setPadding(dp(12), dp(10), dp(16), dp(10))
+                setOnClickListener { showPage(remindersView, true) }
+                addView(icon(R.drawable.ic_alarm, N.LILAC, 20))
+                addView(LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(12), 0, 0, 0)
+                    addView(dots("PRÓXIMO · " + ReminderParser.describe(next).uppercase(Locale("pt", "BR")), 11f, N.LILAC))
+                    addView(label(next.title, 15f, N.TEXT, fonts.regular).apply {
+                        maxLines = 1
+                        ellipsize = TextUtils.TruncateAt.END
+                    })
+                }, LinearLayout.LayoutParams(0, WRAP, 1f))
+            }, LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) })
+        }
+
         val card = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             background = Shapes.aurora(context, 34)
@@ -846,31 +820,31 @@ class MainActivity : Activity() {
         }
         addView(dots("LEMBRETE", 13f, Color.argb(0xAA, 0x15, 0x13, 0x0F)))
         addView(label(reminder.title, 18f, N.INK, fonts.semibold).apply { setPadding(0, dp(4), 0, dp(2)) })
-        addView(dots(ReminderParser.describe(reminder.timeMillis).uppercase(Locale("pt", "BR")), 13f, N.INK))
+        addView(dots(ReminderParser.describe(reminder).uppercase(Locale("pt", "BR")), 13f, N.INK))
         addView(FlowLayout(context, dp(8)).apply {
             setPadding(0, dp(12), 0, 0)
             addView(label("Adicionar à agenda", 13f, N.TEXT, fonts.regular).apply {
                 background = Shapes.solid(context, 18, Color.argb(0xD9, 0x1E, 0x1B, 0x17))
                 setPadding(dp(14), dp(9), dp(14), dp(9))
-                setOnClickListener { addToCalendar(reminder) }
+                setOnClickListener { addToCalendar(reminder.title, reminder.timeMillis) }
             })
             addView(label("Cancelar", 13f, N.INK, fonts.regular).apply {
                 background = Shapes.solid(context, 18, Color.argb(0x73, 0xFF, 0xFF, 0xFF))
                 setPadding(dp(14), dp(9), dp(14), dp(9))
                 setOnClickListener {
-                    ReminderAlarms.cancel(this@MainActivity, id)
-                    chat.deleteReminder(id)
+                    ReminderAlarms.delete(this@MainActivity, chat.reminders, id)
+                    chat.remindersChanged()
                     Toast.makeText(this@MainActivity, "Lembrete cancelado", Toast.LENGTH_SHORT).show()
                 }
             })
         })
     }
 
-    private fun addToCalendar(reminder: Reminder) {
+    internal fun addToCalendar(title: String, timeMillis: Long) {
         val intent = Intent(Intent.ACTION_INSERT, CalendarContract.Events.CONTENT_URI)
-            .putExtra(CalendarContract.Events.TITLE, reminder.title)
-            .putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, reminder.timeMillis)
-            .putExtra(CalendarContract.EXTRA_EVENT_END_TIME, reminder.timeMillis + 30 * 60_000)
+            .putExtra(CalendarContract.Events.TITLE, title)
+            .putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, timeMillis)
+            .putExtra(CalendarContract.EXTRA_EVENT_END_TIME, timeMillis + 30 * 60_000)
             .putExtra(CalendarContract.Events.DESCRIPTION, "Criado pelo Nero")
         try {
             startActivity(intent)
@@ -887,7 +861,7 @@ class MainActivity : Activity() {
                 @Suppress("UNCHECKED_CAST")
                 (settingsView.tag as? () -> Unit)?.invoke()
             }
-            if (page === remindersView) renderReminders()
+            if (page === remindersView) agenda.render()
             page.alpha = 0f
             page.translationY = dp(24).toFloat()
             page.visibility = View.VISIBLE
@@ -1021,7 +995,7 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    private fun askNotificationPermission() {
+    internal fun askNotificationPermission() {
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
@@ -1044,11 +1018,11 @@ class MainActivity : Activity() {
 
     // ---------- Peças visuais ----------
 
-    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+    internal fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     private fun match() = FrameLayout.LayoutParams(MATCH, MATCH)
 
-    private fun label(value: String, sizeSp: Float, color: Int, face: Typeface) = TextView(this).apply {
+    internal fun label(value: String, sizeSp: Float, color: Int, face: Typeface) = TextView(this).apply {
         text = value
         textSize = sizeSp
         setTextColor(color)
@@ -1056,7 +1030,7 @@ class MainActivity : Activity() {
     }
 
     /** Texto em matriz de pontos, usado em títulos curtos e horários. */
-    private fun dots(value: String, sizeSp: Float, color: Int) = label(value, sizeSp, color, fonts.dots)
+    internal fun dots(value: String, sizeSp: Float, color: Int) = label(value, sizeSp, color, fonts.dots)
 
     private fun hint(value: String) = label(value, 13f, N.MUTED, fonts.light).apply {
         setLineSpacing(0f, 1.25f)
@@ -1078,7 +1052,7 @@ class MainActivity : Activity() {
     }
 
     /** Botão redondo de vidro, como os das barras superiores das referências. */
-    private fun roundButton(res: Int, description: String, size: Int = 48, onClick: () -> Unit) =
+    internal fun roundButton(res: Int, description: String, size: Int = 48, onClick: () -> Unit) =
         ImageView(this).apply {
             setImageResource(res)
             imageTintList = ColorStateList.valueOf(N.TEXT)
@@ -1100,7 +1074,7 @@ class MainActivity : Activity() {
     }
 
     /** Pílula principal: creme cheia (ação principal), escura ou de vidro. */
-    private fun pill(title: String, filled: Boolean, dark: Boolean = false, onClick: () -> Unit) =
+    internal fun pill(title: String, filled: Boolean, dark: Boolean = false, onClick: () -> Unit) =
         label(title, 16f, if (filled) N.INK else N.TEXT, fonts.semibold).apply {
             gravity = Gravity.CENTER
             background = when {
@@ -1111,13 +1085,13 @@ class MainActivity : Activity() {
             setOnClickListener { onClick() }
         }
 
-    private fun chip(title: String, onClick: () -> Unit) = label(title, 14f, N.TEXT, fonts.regular).apply {
+    internal fun chip(title: String, onClick: () -> Unit) = label(title, 14f, N.TEXT, fonts.regular).apply {
         background = Shapes.glass(context, 20)
         setPadding(dp(16), dp(9), dp(16), dp(9))
         setOnClickListener { onClick() }
     }
 
-    private fun field(hintText: String) = EditText(this).apply {
+    internal fun field(hintText: String) = EditText(this).apply {
         hint = hintText
         setHintTextColor(N.FAINT)
         setTextColor(N.TEXT)
@@ -1141,7 +1115,7 @@ class MainActivity : Activity() {
     }
 
     /** Cabeçalho das páginas: botão voltar de vidro e título grande com cursor. */
-    private fun pageHeader(title: String, onBack: () -> Unit) = LinearLayout(this).apply {
+    internal fun pageHeader(title: String, onBack: () -> Unit) = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         setPadding(dp(16), dp(10), dp(16), dp(12))
         addView(roundButton(R.drawable.ic_back, "Voltar") { onBack() })
@@ -1155,12 +1129,14 @@ class MainActivity : Activity() {
         })
     }
 
-    private companion object {
-        const val REQ_VOICE = 1
-        const val REQ_GALLERY = 2
-        const val REQ_CAMERA = 3
-        const val REQ_NOTIFICATIONS = 4
-        const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
-        const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
+    companion object {
+        /** Extra da notificação que pede para abrir a agenda. */
+        const val EXTRA_OPEN_AGENDA = "abrir_agenda"
+        private const val REQ_VOICE = 1
+        private const val REQ_GALLERY = 2
+        private const val REQ_CAMERA = 3
+        private const val REQ_NOTIFICATIONS = 4
+        private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
+        private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
     }
 }
