@@ -10,6 +10,9 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.app.NotificationManager
+import android.media.RingtoneManager
+import android.provider.Settings
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -89,6 +92,7 @@ class MainActivity : Activity() {
     private lateinit var scrim: View
     private lateinit var drawer: LinearLayout
     private lateinit var history: LinearLayout
+    private lateinit var soundLabel: TextView
 
     private var drawerOpen = false
     private var streamingBody: TextView? = null
@@ -477,15 +481,7 @@ class MainActivity : Activity() {
             hint("Instruções que o Nero segue em todas as conversas: jeito de falar, idioma, foco."),
         ))
 
-        val deepSwitch = Switch(this).apply {
-            thumbTintList = ColorStateList(
-                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
-                intArrayOf(N.CREAM, N.MUTED),
-            )
-            trackTintList = ColorStateList(
-                arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
-                intArrayOf(N.LILAC_DEEP, Color.argb(0x55, 0xFF, 0xFF, 0xFF)),
-            )
+        val deepSwitch = neroSwitch().apply {
             setOnCheckedChangeListener { _, checked -> if (checked != chat.deepMode) chat.toggleDeepMode() }
         }
         body.addView(card("MODO PROFUNDO", LinearLayout(this).apply {
@@ -495,6 +491,41 @@ class MainActivity : Activity() {
                 LinearLayout.LayoutParams(0, WRAP, 1f))
             addView(deepSwitch)
         }))
+
+        val alarmSwitch = neroSwitch().apply {
+            isChecked = chat.reminders.alarmByDefault
+            setOnCheckedChangeListener { _, checked -> chat.reminders.alarmByDefault = checked }
+        }
+        soundLabel = label("", 14f, N.LILAC, fonts.regular).apply { setPadding(0, dp(14), 0, 0) }
+        refreshSoundLabel()
+        body.addView(card(
+            "ALARME",
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(hint("Na hora do compromisso o Nero toca alarme com som, vibra e acende a tela. " +
+                    "Desligado, os lembretes novos só mandam notificação."), LinearLayout.LayoutParams(0, WRAP, 1f))
+                addView(alarmSwitch)
+            },
+            soundLabel,
+            FlowLayout(this, dp(8)).apply {
+                setPadding(0, dp(12), 0, 0)
+                addView(chip("Escolher som") { pickAlarmSound() })
+                addView(chip("Testar alarme") {
+                    askNotificationPermission()
+                    AlarmService.test(this@MainActivity)
+                })
+                if (Build.VERSION.SDK_INT >= 34 &&
+                    !getSystemService(NotificationManager::class.java).canUseFullScreenIntent()
+                ) {
+                    addView(chip("Permitir tela cheia") {
+                        runCatching {
+                            startActivity(Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:$packageName")))
+                        }
+                    })
+                }
+            },
+        ))
 
         lateinit var saveButton: TextView
         saveButton = pill("Salvar", filled = true) {
@@ -517,7 +548,7 @@ class MainActivity : Activity() {
         }
         body.addView(saveButton, LinearLayout.LayoutParams(MATCH, dp(56)).apply { topMargin = dp(6) })
 
-        body.addView(dots("NERO 1.6 · OPENROUTER", 11f, N.FAINT).apply {
+        body.addView(dots("NERO 1.7 · OPENROUTER", 11f, N.FAINT).apply {
             gravity = Gravity.CENTER
             setPadding(0, dp(28), 0, 0)
         }, LinearLayout.LayoutParams(MATCH, WRAP))
@@ -965,6 +996,13 @@ class MainActivity : Activity() {
             }
             REQ_GALLERY -> data?.data?.let(::importImage)
             REQ_CAMERA -> cameraUri?.let(::importImage)
+            REQ_SOUND -> {
+                @Suppress("DEPRECATION")
+                val picked = data?.getParcelableExtra<Uri>(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
+                // "Padrão" volta como o URI genérico de alarme: guarda vazio para seguir o do celular.
+                chat.reminders.alarmSound = picked?.takeIf { !RingtoneManager.isDefault(it) }?.toString().orEmpty()
+                refreshSoundLabel()
+            }
         }
     }
 
@@ -1016,7 +1054,43 @@ class MainActivity : Activity() {
         imm.hideSoftInputFromWindow(root.windowToken, 0)
     }
 
+    // ---------- Som do alarme ----------
+
+    private fun pickAlarmSound() {
+        val current = chat.reminders.alarmSound.takeIf { it.isNotEmpty() }?.let(Uri::parse)
+            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+        val intent = Intent(RingtoneManager.ACTION_RINGTONE_PICKER)
+            .putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_ALARM)
+            .putExtra(RingtoneManager.EXTRA_RINGTONE_TITLE, "Som do alarme do Nero")
+            .putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, false)
+            .putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
+            .putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, current)
+        try {
+            @Suppress("DEPRECATION")
+            startActivityForResult(intent, REQ_SOUND)
+        } catch (e: ActivityNotFoundException) {
+            Toast.makeText(this, "Este celular não tem seletor de sons.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun refreshSoundLabel() {
+        val uri = chat.reminders.alarmSound.takeIf { it.isNotEmpty() }?.let(Uri::parse)
+        val name = uri?.let { runCatching { RingtoneManager.getRingtone(this, it)?.getTitle(this) }.getOrNull() }
+        soundLabel.text = "Som: " + (name ?: "alarme padrão do celular")
+    }
+
     // ---------- Peças visuais ----------
+
+    private fun neroSwitch() = Switch(this).apply {
+        thumbTintList = ColorStateList(
+            arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+            intArrayOf(N.CREAM, N.MUTED),
+        )
+        trackTintList = ColorStateList(
+            arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+            intArrayOf(N.LILAC_DEEP, Color.argb(0x55, 0xFF, 0xFF, 0xFF)),
+        )
+    }
 
     internal fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -1136,6 +1210,7 @@ class MainActivity : Activity() {
         private const val REQ_GALLERY = 2
         private const val REQ_CAMERA = 3
         private const val REQ_NOTIFICATIONS = 4
+        private const val REQ_SOUND = 5
         private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
     }
