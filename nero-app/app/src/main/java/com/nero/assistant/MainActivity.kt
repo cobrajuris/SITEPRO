@@ -5,6 +5,7 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.ActivityNotFoundException
 import android.content.ClipData
+import android.content.ContentUris
 import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
@@ -93,6 +94,7 @@ class MainActivity : Activity() {
     private lateinit var drawer: LinearLayout
     private lateinit var history: LinearLayout
     private lateinit var soundLabel: TextView
+    private lateinit var calendarLabel: TextView
 
     private var drawerOpen = false
     private var streamingBody: TextView? = null
@@ -109,8 +111,9 @@ class MainActivity : Activity() {
             ReminderStore(this),
             isOnline = { isOnline() },
             onReminderCreated = { reminder ->
-                ReminderAlarms.schedule(this, reminder)
-                askNotificationPermission()
+                // Todo compromisso marcado ganha o alarme do Nero e vai para o calendário do celular.
+                ReminderAlarms.created(this, chat.reminders, reminder)
+                askReminderPermissions()
             },
         )
 
@@ -169,6 +172,7 @@ class MainActivity : Activity() {
         super.onResume()
         // Um lembrete pode ter sido concluído pela notificação enquanto o app estava fechado.
         if (::agenda.isInitialized && remindersView.visibility == View.VISIBLE) agenda.render()
+        refreshCalendarLabel()
     }
 
     @Deprecated("Back simples para Activity sem AndroidX")
@@ -492,21 +496,12 @@ class MainActivity : Activity() {
             addView(deepSwitch)
         }))
 
-        val alarmSwitch = neroSwitch().apply {
-            isChecked = chat.reminders.alarmByDefault
-            setOnCheckedChangeListener { _, checked -> chat.reminders.alarmByDefault = checked }
-        }
         soundLabel = label("", 14f, N.LILAC, fonts.regular).apply { setPadding(0, dp(14), 0, 0) }
         refreshSoundLabel()
         body.addView(card(
             "ALARME",
-            LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                addView(hint("Na hora do compromisso o Nero toca alarme com som, vibra e acende a tela. " +
-                    "Desligado, os lembretes novos só mandam notificação."), LinearLayout.LayoutParams(0, WRAP, 1f))
-                addView(alarmSwitch)
-            },
+            hint("Todo compromisso que você marcar (por texto, voz ou foto) toca o alarme do Nero: som, " +
+                "vibração e tela acesa. Peça \"me avisa 1 hora antes\" e o alarme toca 1 hora antes."),
             soundLabel,
             FlowLayout(this, dp(8)).apply {
                 setPadding(0, dp(12), 0, 0)
@@ -525,6 +520,31 @@ class MainActivity : Activity() {
                     })
                 }
             },
+        ))
+
+        val calendarSwitch = neroSwitch().apply {
+            isChecked = chat.reminders.calendarSync
+            setOnCheckedChangeListener { _, checked ->
+                chat.reminders.calendarSync = checked
+                if (checked) askReminderPermissions()
+                refreshCalendarLabel()
+            }
+        }
+        calendarLabel = label("", 14f, N.LILAC, fonts.regular).apply {
+            setPadding(0, dp(14), 0, 0)
+            setOnClickListener { askReminderPermissions() }
+        }
+        refreshCalendarLabel()
+        body.addView(card(
+            "CALENDÁRIO DO CELULAR",
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(hint("Salva cada compromisso direto no calendário do celular (Google Agenda), junto com o alarme."),
+                    LinearLayout.LayoutParams(0, WRAP, 1f))
+                addView(calendarSwitch)
+            },
+            calendarLabel,
         ))
 
         lateinit var saveButton: TextView
@@ -548,7 +568,7 @@ class MainActivity : Activity() {
         }
         body.addView(saveButton, LinearLayout.LayoutParams(MATCH, dp(56)).apply { topMargin = dp(6) })
 
-        body.addView(dots("NERO 1.7 · OPENROUTER", 11f, N.FAINT).apply {
+        body.addView(dots("NERO 1.8 · OPENROUTER", 11f, N.FAINT).apply {
             gravity = Gravity.CENTER
             setPadding(0, dp(28), 0, 0)
         }, LinearLayout.LayoutParams(MATCH, WRAP))
@@ -849,15 +869,19 @@ class MainActivity : Activity() {
             addView(dots("LEMBRETE REMOVIDO", 13f, Color.argb(0xAA, 0x15, 0x13, 0x0F)))
             return@apply
         }
-        addView(dots("LEMBRETE", 13f, Color.argb(0xAA, 0x15, 0x13, 0x0F)))
+        val status = buildList {
+            add(if (reminder.alarm) "ALARME" else "LEMBRETE")
+            if (reminder.eventId != null) add("NO CALENDÁRIO")
+        }.joinToString(" · ")
+        addView(dots(status, 13f, Color.argb(0xAA, 0x15, 0x13, 0x0F)))
         addView(label(reminder.title, 18f, N.INK, fonts.semibold).apply { setPadding(0, dp(4), 0, dp(2)) })
         addView(dots(ReminderParser.describe(reminder).uppercase(Locale("pt", "BR")), 13f, N.INK))
         addView(FlowLayout(context, dp(8)).apply {
             setPadding(0, dp(12), 0, 0)
-            addView(label("Adicionar à agenda", 13f, N.TEXT, fonts.regular).apply {
+            addView(label(if (reminder.eventId != null) "Ver no calendário" else "Adicionar ao calendário", 13f, N.TEXT, fonts.regular).apply {
                 background = Shapes.solid(context, 18, Color.argb(0xD9, 0x1E, 0x1B, 0x17))
                 setPadding(dp(14), dp(9), dp(14), dp(9))
-                setOnClickListener { addToCalendar(reminder.title, reminder.timeMillis) }
+                setOnClickListener { openInCalendar(reminder, reminder.timeMillis) }
             })
             addView(label("Cancelar", 13f, N.INK, fonts.regular).apply {
                 background = Shapes.solid(context, 18, Color.argb(0x73, 0xFF, 0xFF, 0xFF))
@@ -869,6 +893,18 @@ class MainActivity : Activity() {
                 }
             })
         })
+    }
+
+    /** Abre o evento no calendário se ele já foi salvo lá; senão, abre o app de agenda já preenchido. */
+    internal fun openInCalendar(reminder: Reminder, timeMillis: Long) {
+        val eventId = reminder.eventId
+        if (eventId != null) {
+            val view = Intent(Intent.ACTION_VIEW, ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId))
+                .putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, timeMillis)
+                .putExtra(CalendarContract.EXTRA_EVENT_END_TIME, timeMillis + 30 * 60_000)
+            if (runCatching { startActivity(view) }.isSuccess) return
+        }
+        addToCalendar(reminder.title, timeMillis)
     }
 
     internal fun addToCalendar(title: String, timeMillis: Long) {
@@ -1033,6 +1069,34 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    /**
+     * Pede de uma vez o que um compromisso precisa: notificações (para o alarme aparecer) e acesso
+     * ao calendário (para salvar o evento). Só pede o que ainda falta.
+     */
+    internal fun askReminderPermissions() {
+        val missing = buildList {
+            if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
+            if (chat.reminders.calendarSync) addAll(CalendarSync.PERMISSIONS)
+        }.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isNotEmpty()) requestPermissions(missing.toTypedArray(), REQ_PERMISSIONS)
+    }
+
+    @Deprecated("Activity sem AndroidX")
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        @Suppress("DEPRECATION")
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_PERMISSIONS && CalendarSync.hasPermission(this)) {
+            // Leva para o calendário o que foi marcado antes da permissão.
+            Thread {
+                CalendarSync.syncPending(this, chat.reminders)
+                runOnUiThread {
+                    refreshCalendarLabel()
+                    chat.remindersChanged()
+                }
+            }.start()
+        }
+    }
+
     internal fun askNotificationPermission() {
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -1070,6 +1134,15 @@ class MainActivity : Activity() {
             startActivityForResult(intent, REQ_SOUND)
         } catch (e: ActivityNotFoundException) {
             Toast.makeText(this, "Este celular não tem seletor de sons.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    internal fun refreshCalendarLabel() {
+        if (!::calendarLabel.isInitialized) return
+        calendarLabel.text = when {
+            !chat.reminders.calendarSync -> "Desligado"
+            !CalendarSync.hasPermission(this) -> "Toque aqui para permitir o acesso ao calendário"
+            else -> CalendarSync.target(this)?.let { "Salvando em: ${it.name}" } ?: "Nenhum calendário encontrado neste celular"
         }
     }
 
@@ -1211,6 +1284,7 @@ class MainActivity : Activity() {
         private const val REQ_CAMERA = 3
         private const val REQ_NOTIFICATIONS = 4
         private const val REQ_SOUND = 5
+        private const val REQ_PERMISSIONS = 6
         private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
     }
