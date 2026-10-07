@@ -8,35 +8,65 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.graphics.drawable.Icon
 import android.os.Build
+import com.nero.assistant.data.Recurrence
 import com.nero.assistant.data.Reminder
 import com.nero.assistant.data.ReminderStore
+import com.nero.assistant.data.Repeat
 
-/** Agenda e cancela os alarmes dos lembretes. */
+/** Agenda e cancela os alarmes dos lembretes, e reúne as ações que mexem neles. */
 object ReminderAlarms {
 
     const val CHANNEL_ID = "nero_lembretes"
     private const val EXTRA_ID = "reminder_id"
+    private const val EXTRA_SNOOZE = "snooze"
+    private const val ACTION_DONE = "com.nero.assistant.LEMBRETE_FEITO"
+    private const val ACTION_SNOOZE = "com.nero.assistant.LEMBRETE_ADIAR"
+    private const val SNOOZE_MINUTES = 10
+    private const val SNOOZE_SALT = 0x5A5A5A5AL
 
     fun schedule(context: Context, reminder: Reminder) {
-        if (reminder.timeMillis <= System.currentTimeMillis()) return
-        val alarms = context.getSystemService(AlarmManager::class.java)
-        val pending = pendingIntent(context, reminder.id)
-        // Alarme exato quando o Android permite; senão, um alarme que pode atrasar alguns minutos.
-        val exactAllowed = Build.VERSION.SDK_INT < Build.VERSION_CODES.S || alarms.canScheduleExactAlarms()
-        if (exactAllowed) {
-            alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, reminder.timeMillis, pending)
-        } else {
-            alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, reminder.timeMillis, pending)
-        }
+        if (reminder.done || reminder.timeMillis <= System.currentTimeMillis()) return
+        setAlarm(context, reminder.timeMillis, alarmIntent(context, reminder.id, snooze = false))
     }
 
     fun cancel(context: Context, id: Long) {
-        context.getSystemService(AlarmManager::class.java).cancel(pendingIntent(context, id))
+        val alarms = context.getSystemService(AlarmManager::class.java)
+        alarms.cancel(alarmIntent(context, id, snooze = false))
+        alarms.cancel(alarmIntent(context, id, snooze = true))
         context.getSystemService(NotificationManager::class.java).cancel(id.toInt())
     }
 
-    fun rescheduleAll(context: Context) = ReminderStore(context).upcoming().forEach { schedule(context, it) }
+    fun rescheduleAll(context: Context) {
+        val store = ReminderStore(context)
+        val now = System.currentTimeMillis()
+        store.all().filterNot { it.done }.forEach { r ->
+            // Lembretes que se repetem e passaram com o celular desligado pulam para a próxima vez.
+            val current = if (r.repeat != Repeat.NONE && r.timeMillis <= now) {
+                r.copy(timeMillis = Recurrence.next(r.timeMillis, r.repeat, now)!!).also(store::update)
+            } else r
+            schedule(context, current)
+        }
+    }
+
+    /** Salva (cria ou edita) um lembrete e acerta o alarme. */
+    fun save(context: Context, store: ReminderStore, reminder: Reminder) {
+        store.update(reminder)
+        cancel(context, reminder.id)
+        schedule(context, reminder)
+    }
+
+    /** Conclui o lembrete; os que se repetem passam para a próxima vez. */
+    fun complete(context: Context, store: ReminderStore, id: Long): Reminder? {
+        cancel(context, id)
+        return store.complete(id)?.also { schedule(context, it) }
+    }
+
+    fun delete(context: Context, store: ReminderStore, id: Long) {
+        cancel(context, id)
+        store.remove(id)
+    }
 
     fun ensureChannel(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java)
@@ -50,40 +80,102 @@ object ReminderAlarms {
         }
     }
 
-    internal fun notify(context: Context, id: Long) {
-        val reminder = ReminderStore(context).get(id) ?: return
+    /** Chegou a hora: avisa e, se o lembrete se repete, já agenda a próxima vez. */
+    internal fun fire(context: Context, id: Long, snooze: Boolean) {
+        val store = ReminderStore(context)
+        val reminder = store.get(id) ?: return
+        if (reminder.done) return
+        notify(context, reminder)
+        if (!snooze && reminder.repeat != Repeat.NONE) {
+            val next = Recurrence.next(reminder.timeMillis, reminder.repeat, System.currentTimeMillis()) ?: return
+            val updated = reminder.copy(timeMillis = next)
+            store.update(updated)
+            schedule(context, updated)
+        }
+    }
+
+    internal fun handleAction(context: Context, intent: Intent) {
+        val id = intent.getLongExtra(EXTRA_ID, -1L).takeIf { it >= 0 } ?: return
+        val store = ReminderStore(context)
+        when (intent.action) {
+            ACTION_DONE -> {
+                val reminder = store.get(id) ?: return
+                // Se repete, o alarme já foi para a próxima vez quando tocou: só fecha o aviso.
+                if (reminder.repeat == Repeat.NONE) store.update(reminder.copy(done = true))
+                context.getSystemService(NotificationManager::class.java).cancel(id.toInt())
+            }
+            ACTION_SNOOZE -> {
+                context.getSystemService(NotificationManager::class.java).cancel(id.toInt())
+                setAlarm(context, System.currentTimeMillis() + SNOOZE_MINUTES * 60_000L, alarmIntent(context, id, snooze = true))
+            }
+        }
+    }
+
+    private fun notify(context: Context, reminder: Reminder) {
         ensureChannel(context)
+        val id = reminder.id
         val open = PendingIntent.getActivity(
             context, id.toInt(),
-            Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            Intent(context, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                .putExtra(MainActivity.EXTRA_OPEN_AGENDA, true),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
+        val text = if (reminder.repeat != Repeat.NONE) "Está na hora. ${reminder.repeat.label}." else "Está na hora."
         val notification = Notification.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("Nero lembra: ${reminder.title}")
-            .setContentText("Está na hora.")
+            .setContentText(text)
             .setCategory(Notification.CATEGORY_REMINDER)
             .setContentIntent(open)
             .setAutoCancel(true)
+            .addAction(action(context, id, ACTION_DONE, R.drawable.ic_check, "Concluído"))
+            .addAction(action(context, id, ACTION_SNOOZE, R.drawable.ic_alarm, "Adiar $SNOOZE_MINUTES min"))
             .build()
         runCatching { context.getSystemService(NotificationManager::class.java).notify(id.toInt(), notification) }
     }
 
-    private fun pendingIntent(context: Context, id: Long): PendingIntent = PendingIntent.getBroadcast(
-        context, id.toInt(),
-        Intent(context, ReminderReceiver::class.java).putExtra(EXTRA_ID, id),
+    private fun action(context: Context, id: Long, action: String, icon: Int, title: String): Notification.Action {
+        val pending = PendingIntent.getBroadcast(
+            context, (id.toInt() * 31) + action.hashCode(),
+            Intent(context, ReminderActionReceiver::class.java).setAction(action).putExtra(EXTRA_ID, id),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        return Notification.Action.Builder(Icon.createWithResource(context, icon), title, pending).build()
+    }
+
+    private fun setAlarm(context: Context, at: Long, pending: PendingIntent) {
+        val alarms = context.getSystemService(AlarmManager::class.java)
+        // Alarme exato quando o Android permite; senão, um alarme que pode atrasar alguns minutos.
+        val exactAllowed = Build.VERSION.SDK_INT < Build.VERSION_CODES.S || alarms.canScheduleExactAlarms()
+        if (exactAllowed) {
+            alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pending)
+        } else {
+            alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pending)
+        }
+    }
+
+    private fun alarmIntent(context: Context, id: Long, snooze: Boolean): PendingIntent = PendingIntent.getBroadcast(
+        context, if (snooze) (id xor SNOOZE_SALT).toInt() else id.toInt(),
+        Intent(context, ReminderReceiver::class.java).putExtra(EXTRA_ID, id).putExtra(EXTRA_SNOOZE, snooze),
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
 
     internal fun idFrom(intent: Intent) = intent.getLongExtra(EXTRA_ID, -1L)
+    internal fun isSnooze(intent: Intent) = intent.getBooleanExtra(EXTRA_SNOOZE, false)
 }
 
 /** Dispara a notificação quando chega a hora do lembrete. */
 class ReminderReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val id = ReminderAlarms.idFrom(intent)
-        if (id >= 0) ReminderAlarms.notify(context, id)
+        if (id >= 0) ReminderAlarms.fire(context, id, ReminderAlarms.isSnooze(intent))
     }
+}
+
+/** Botões da notificação: "Concluído" e "Adiar". */
+class ReminderActionReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) = ReminderAlarms.handleAction(context, intent)
 }
 
 /** Depois de reiniciar o celular, o Android apaga os alarmes: agenda tudo de novo. */

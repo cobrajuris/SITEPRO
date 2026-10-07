@@ -131,10 +131,8 @@ class ChatController(
         onChange()
     }
 
-    fun deleteReminder(id: Long) {
-        reminders.remove(id)
-        onChange()
-    }
+    /** Avisa a tela que a agenda mudou (lembrete criado, editado, concluído ou apagado). */
+    fun remindersChanged() = onChange()
 
     fun clearError() {
         error = null
@@ -196,7 +194,7 @@ class ChatController(
             val ids = ReminderParser.tokenIds(turn.text)
             if (ids.isEmpty()) turn else turn.copy(
                 text = ReminderParser.stripTokens(turn.text) + ids.joinToString("") { id ->
-                    reminders.get(id)?.let { "\n(Lembrete criado: ${it.title}, ${ReminderParser.describe(it.timeMillis)})" } ?: ""
+                    reminders.get(id)?.let { "\n(Lembrete criado: ${it.title}, ${ReminderParser.describe(it)})" } ?: ""
                 }
             )
         }
@@ -206,10 +204,11 @@ class ChatController(
         val deep = deepMode
         val name = userName
         val prompt = systemPrompt
+        val instructions = ReminderParser.instructions(agenda = reminders.upcoming())
         Thread {
             val buffer = StringBuilder()
             try {
-                svc.streamReply(history, chosenModel, deep, name, prompt, ReminderParser.instructions(), { cancelled.get() }) { piece ->
+                svc.streamReply(history, chosenModel, deep, name, prompt, instructions, { cancelled.get() }) { piece ->
                     buffer.append(piece)
                     val snapshot = buffer.toString()
                     main.post {
@@ -243,7 +242,7 @@ class ChatController(
         // Se a IA pediu um lembrete, cria e agenda, e deixa uma marca no texto para a tela mostrar o cartão.
         val (clean, request) = ReminderParser.extract(raw)
         val text = if (request != null) {
-            val reminder = reminders.add(request.title, request.timeMillis)
+            val reminder = reminders.add(request.title, request.timeMillis, request.repeat)
             onReminderCreated(reminder)
             clean + "\n" + ReminderParser.token(reminder.id)
         } else {

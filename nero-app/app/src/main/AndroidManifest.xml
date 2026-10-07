@@ -25,6 +25,7 @@
         android:theme="@style/Theme.Nero">
         <activity
             android:name=".MainActivity"
+            android:launchMode="singleTop"
             android:exported="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode"
             android:windowSoftInputMode="adjustResize">
@@ -36,6 +37,9 @@
 
         <receiver
             android:name=".ReminderReceiver"
+            android:exported="false" />
+        <receiver
+            android:name=".ReminderActionReceiver"
             android:exported="false" />
         <receiver
             android:name=".BootReceiver"
