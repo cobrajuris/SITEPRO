@@ -14,6 +14,9 @@ App Android nativo (Kotlin, componentes nativos do Android) com a identidade do 
 - **Agenda** (versão 1.6): calendário do mês com pontinhos nos dias com lembrete, lista do dia,
   criar/editar/apagar lembretes à mão, repetição diária, semanal ou mensal, e lista dos próximos
 - Lembretes guardados em banco SQLite no aparelho; notificação com botões **Concluído** e **Adiar 10 min**
+- **Alarme próprio** (versão 1.7): na hora do compromisso (ou 5/15/30/60 min antes) o Nero toca som de
+  alarme subindo aos poucos, vibra e acende a tela por cima do bloqueio com **Concluído** e **Adiar 10 min**;
+  som escolhível e botão de teste em Ajustes; cada lembrete pode ser alarme ou só notificação
 - O Nero conhece seus próximos lembretes e responde perguntas como "o que tenho amanhã?"
 - Chave conferida no OpenRouter antes de salvar e guardada criptografada (Android Keystore)
 - Histórico de conversas salvo no aparelho, com menu lateral

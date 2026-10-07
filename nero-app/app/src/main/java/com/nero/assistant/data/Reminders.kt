@@ -40,7 +40,23 @@ data class Reminder(
     val timeMillis: Long,
     val repeat: Repeat = Repeat.NONE,
     val done: Boolean = false,
-)
+    /** true: toca o alarme do Nero (som, vibração e tela cheia); false: só notificação. */
+    val alarm: Boolean = true,
+    /** Quantos minutos antes do horário o aviso dispara. */
+    val leadMinutes: Int = 0,
+) {
+    /** Quando o aviso deve tocar (o horário menos a antecedência). */
+    val alertAt get() = timeMillis - leadMinutes * 60_000L
+}
+
+/** Opções de antecedência oferecidas no editor. */
+val LEAD_OPTIONS = listOf(0, 5, 15, 30, 60)
+
+fun leadLabel(minutes: Int) = when {
+    minutes <= 0 -> "Na hora"
+    minutes % 60 == 0 -> "${minutes / 60} h antes"
+    else -> "$minutes min antes"
+}
 
 /** Contas de datas dos lembretes que se repetem (sem depender do Android, para dar para testar). */
 object Recurrence {
@@ -89,22 +105,40 @@ object Recurrence {
 }
 
 /** Banco SQLite dos lembretes (só usa o que já vem no Android). */
-private class ReminderDb(context: Context) : SQLiteOpenHelper(context, "nero.db", null, 1) {
+private class ReminderDb(context: Context) : SQLiteOpenHelper(context, "nero.db", null, 2) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             "CREATE TABLE reminders (id INTEGER PRIMARY KEY, title TEXT NOT NULL, time INTEGER NOT NULL, " +
-                "repeat TEXT NOT NULL DEFAULT '', done INTEGER NOT NULL DEFAULT 0)"
+                "repeat TEXT NOT NULL DEFAULT '', done INTEGER NOT NULL DEFAULT 0, " +
+                "alarm INTEGER NOT NULL DEFAULT 1, lead INTEGER NOT NULL DEFAULT 0)"
         )
         db.execSQL("CREATE INDEX reminders_time ON reminders(time)")
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        // Versão 2 (Nero 1.7): alarme próprio e antecedência.
+        if (oldVersion < 2) {
+            db.execSQL("ALTER TABLE reminders ADD COLUMN alarm INTEGER NOT NULL DEFAULT 1")
+            db.execSQL("ALTER TABLE reminders ADD COLUMN lead INTEGER NOT NULL DEFAULT 0")
+        }
+    }
 }
 
 /** Guarda os lembretes no aparelho. */
 class ReminderStore(context: Context) {
 
     private val db = ReminderDb(context.applicationContext)
+    private val settings = context.getSharedPreferences("nero_alarm", Context.MODE_PRIVATE)
+
+    /** Lembretes novos já vêm com o alarme ligado? */
+    var alarmByDefault: Boolean
+        get() = settings.getBoolean("alarm_default", true)
+        set(value) = settings.edit().putBoolean("alarm_default", value).apply()
+
+    /** Som escolhido para o alarme (vazio = o alarme padrão do celular). */
+    var alarmSound: String
+        get() = settings.getString("alarm_sound", "").orEmpty()
+        set(value) = settings.edit().putString("alarm_sound", value).apply()
 
     init {
         // A versão 1.4/1.5 guardava os lembretes em SharedPreferences: copia para o banco uma única vez.
@@ -138,11 +172,17 @@ class ReminderStore(context: Context) {
 
     fun get(id: Long) = query("id = ?", arrayOf(id.toString())).firstOrNull()
 
-    fun add(title: String, timeMillis: Long, repeat: Repeat = Repeat.NONE): Reminder {
+    fun add(
+        title: String,
+        timeMillis: Long,
+        repeat: Repeat = Repeat.NONE,
+        alarm: Boolean = alarmByDefault,
+        leadMinutes: Int = 0,
+    ): Reminder {
         val last = db.readableDatabase.rawQuery("SELECT MAX(id) FROM $TABLE", null).use { c ->
             if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else 0L
         }
-        val reminder = Reminder(maxOf(System.currentTimeMillis(), last + 1), title.trim(), timeMillis, repeat)
+        val reminder = Reminder(maxOf(System.currentTimeMillis(), last + 1), title.trim(), timeMillis, repeat, false, alarm, leadMinutes.coerceAtLeast(0))
         db.writableDatabase.insert(TABLE, null, values(reminder))
         return reminder
     }
@@ -181,6 +221,8 @@ class ReminderStore(context: Context) {
                     timeMillis = c.getLong(c.getColumnIndexOrThrow("time")),
                     repeat = Repeat.from(c.getString(c.getColumnIndexOrThrow("repeat"))),
                     done = c.getInt(c.getColumnIndexOrThrow("done")) != 0,
+                    alarm = c.getInt(c.getColumnIndexOrThrow("alarm")) != 0,
+                    leadMinutes = c.getInt(c.getColumnIndexOrThrow("lead")),
                 )
             }
             list
@@ -192,6 +234,8 @@ class ReminderStore(context: Context) {
         put("time", r.timeMillis)
         put("repeat", r.repeat.key)
         put("done", if (r.done) 1 else 0)
+        put("alarm", if (r.alarm) 1 else 0)
+        put("lead", r.leadMinutes)
     }
 
     private companion object {
@@ -210,7 +254,14 @@ object ReminderParser {
     private val TOKEN = Regex("""\[\[lembrete:(\d+)]]""")
     private val PT_BR = Locale("pt", "BR")
 
-    data class Request(val title: String, val timeMillis: Long, val repeat: Repeat = Repeat.NONE)
+    data class Request(
+        val title: String,
+        val timeMillis: Long,
+        val repeat: Repeat = Repeat.NONE,
+        /** null: segue o padrão dos Ajustes. */
+        val alarm: Boolean? = null,
+        val leadMinutes: Int = 0,
+    )
 
     /** Devolve o texto sem o bloco e o pedido de lembrete encontrado (se for válido). */
     fun extract(text: String, timeZone: TimeZone = TimeZone.getDefault()): Pair<String, Request?> {
@@ -221,7 +272,9 @@ object ReminderParser {
             val title = json.getString("titulo").trim()
             val time = parseTime(json.getString("quando"), timeZone)
             val repeat = Repeat.from(json.optString("repetir"))
-            if (title.isEmpty() || time == null) null else Request(title, time, repeat)
+            val alarm = if (json.has("alarme")) json.optBoolean("alarme", true) else null
+            val lead = json.optInt("antes", 0).coerceIn(0, 24 * 60)
+            if (title.isEmpty() || time == null) null else Request(title, time, repeat, alarm, lead)
         }.getOrNull()
         return clean to request
     }
@@ -280,6 +333,9 @@ object ReminderParser {
             [[LEMBRETE {"titulo": "texto curto do lembrete", "quando": "AAAA-MM-DDTHH:MM"}]]
             Se ele pedir algo que se repete, acrescente "repetir" com "diario", "semanal" ou "mensal", por exemplo:
             [[LEMBRETE {"titulo": "Tomar remédio", "quando": "2026-10-08T08:00", "repetir": "diario"}]]
+            Se ele pedir para ser avisado antes, acrescente "antes" com os minutos de antecedência
+            (ex.: "antes": 30). O Nero toca um alarme com som; se ele pedir só uma notificação, sem
+            alarme, acrescente "alarme": false.
             Use horário local de 24h. Se faltar o horário, use 09:00. Se faltar a data, pergunte antes
             e não escreva a linha. Nunca escreva essa linha em outras situações.
             Se o novo lembrete cair no mesmo horário de outro já existente, avise o usuário.
@@ -304,7 +360,9 @@ object ReminderParser {
 
     /** Data e repetição, como "Amanhã às 08:00 · Todo dia". */
     fun describe(reminder: Reminder, now: Long = System.currentTimeMillis()): String =
-        describe(reminder.timeMillis, now) + if (reminder.repeat != Repeat.NONE) " · ${reminder.repeat.label}" else ""
+        describe(reminder.timeMillis, now) +
+            (if (reminder.repeat != Repeat.NONE) " · ${reminder.repeat.label}" else "") +
+            (if (reminder.leadMinutes > 0) " · Avisa ${leadLabel(reminder.leadMinutes).lowercase(PT_BR)}" else "")
 
     private fun daysBetween(a: Calendar, b: Calendar): Int {
         fun dayStart(c: Calendar) = (c.clone() as Calendar).apply {

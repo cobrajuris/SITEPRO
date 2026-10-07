@@ -19,6 +19,8 @@ import com.nero.assistant.data.Reminder
 import com.nero.assistant.data.ReminderParser
 import com.nero.assistant.data.ReminderStore
 import com.nero.assistant.data.Repeat
+import com.nero.assistant.data.LEAD_OPTIONS
+import com.nero.assistant.data.leadLabel
 import com.nero.assistant.ui.FlowLayout
 import com.nero.assistant.ui.N
 import com.nero.assistant.ui.Shapes
@@ -202,7 +204,12 @@ class AgendaPage(
                 if (reminder.done) paintFlags = paintFlags or Paint.STRIKE_THRU_TEXT_FLAG
             })
             val repeat = if (reminder.repeat != Repeat.NONE) " · ${reminder.repeat.label}" else ""
-            addView(a.dots((format("HH:mm", time) + repeat).uppercase(PT_BR), 11f, if (reminder.done) N.FAINT else N.LILAC))
+            val alert = when {
+                !reminder.alarm -> ""
+                reminder.leadMinutes > 0 -> " · Alarme ${leadLabel(reminder.leadMinutes).lowercase(PT_BR)}"
+                else -> " · Alarme"
+            }
+            addView(a.dots((format("HH:mm", time) + repeat + alert).uppercase(PT_BR), 11f, if (reminder.done) N.FAINT else N.LILAC))
         }, LinearLayout.LayoutParams(0, WRAP, 1f))
 
         addView(a.roundButton(R.drawable.ic_event, "Adicionar à agenda do celular", size = 40) {
@@ -281,6 +288,8 @@ class AgendaPage(
             set(Calendar.MILLISECOND, 0)
         }
         var repeat = existing?.repeat ?: Repeat.NONE
+        var alarm = existing?.alarm ?: store.alarmByDefault
+        var lead = existing?.leadMinutes ?: 0
 
         val box = panel().apply { setPadding(a.dp(20), a.dp(22), a.dp(20), a.dp(18)) }
         val dialog = AlertDialog.Builder(a).setView(ScrollView(a).apply { addView(box) }).create()
@@ -324,11 +333,7 @@ class AgendaPage(
 
         box.addView(a.dots("REPETIR", 12f, N.MUTED).apply { setPadding(0, a.dp(18), 0, a.dp(8)) })
         val repeatChips = mutableMapOf<Repeat, TextView>()
-        fun refreshRepeat() = repeatChips.forEach { (r, chip) ->
-            val on = r == repeat
-            chip.background = if (on) Shapes.aurora(a, 20) else Shapes.glass(a, 20)
-            chip.setTextColor(if (on) N.INK else N.TEXT)
-        }
+        fun refreshRepeat() = repeatChips.forEach { (r, chip) -> select(chip, r == repeat) }
         box.addView(FlowLayout(a, a.dp(8)).apply {
             Repeat.entries.forEach { r ->
                 val chip = a.chip(r.label) {
@@ -341,6 +346,37 @@ class AgendaPage(
         })
         refreshRepeat()
 
+        // Como avisar: alarme do Nero (som + tela cheia) ou só notificação, e com quanta antecedência.
+        box.addView(a.dots("AVISO", 12f, N.MUTED).apply { setPadding(0, a.dp(18), 0, a.dp(8)) })
+        val alertChips = mutableMapOf<Boolean, TextView>()
+        val leadChips = mutableMapOf<Int, TextView>()
+        fun refreshAlert() {
+            alertChips.forEach { (on, chip) -> select(chip, on == alarm) }
+            leadChips.forEach { (m, chip) -> select(chip, m == lead) }
+        }
+        box.addView(FlowLayout(a, a.dp(8)).apply {
+            listOf(true to "Alarme com som", false to "Só notificação").forEach { (on, title) ->
+                val chip = a.chip(title) {
+                    alarm = on
+                    refreshAlert()
+                }
+                alertChips[on] = chip
+                addView(chip)
+            }
+        })
+        box.addView(FlowLayout(a, a.dp(8)).apply {
+            setPadding(0, a.dp(8), 0, 0)
+            (LEAD_OPTIONS + listOfNotNull(lead.takeIf { it !in LEAD_OPTIONS })).forEach { m ->
+                val chip = a.chip(leadLabel(m)) {
+                    lead = m
+                    refreshAlert()
+                }
+                leadChips[m] = chip
+                addView(chip)
+            }
+        })
+        refreshAlert()
+
         box.addView(a.pill("Salvar", filled = true) {
             val text = title.text.toString().trim()
             when {
@@ -349,9 +385,12 @@ class AgendaPage(
                     toast("Esse horário já passou. Escolha outro.")
                 else -> {
                     val saved = if (existing == null) {
-                        store.add(text, time.timeInMillis, repeat).also { ReminderAlarms.schedule(a, it) }
+                        store.add(text, time.timeInMillis, repeat, alarm, lead).also { ReminderAlarms.schedule(a, it) }
                     } else {
-                        existing.copy(title = text, timeMillis = time.timeInMillis, repeat = repeat, done = false)
+                        existing.copy(
+                            title = text, timeMillis = time.timeInMillis, repeat = repeat, done = false,
+                            alarm = alarm, leadMinutes = lead,
+                        )
                             .also { ReminderAlarms.save(a, store, it) }
                     }
                     a.askNotificationPermission()
@@ -401,6 +440,11 @@ class AgendaPage(
         background = Shapes.glass(a, 30, N.GLASS_DARKER)
         setPadding(a.dp(16), a.dp(20), a.dp(16), a.dp(16))
         layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = a.dp(14) }
+    }
+
+    private fun select(chip: TextView, on: Boolean) {
+        chip.background = if (on) Shapes.aurora(a, 20) else Shapes.glass(a, 20)
+        chip.setTextColor(if (on) N.INK else N.TEXT)
     }
 
     private fun toast(message: String) = Toast.makeText(a, message, Toast.LENGTH_SHORT).show()

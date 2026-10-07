@@ -242,7 +242,10 @@ class ChatController(
         // Se a IA pediu um lembrete, cria e agenda, e deixa uma marca no texto para a tela mostrar o cartão.
         val (clean, request) = ReminderParser.extract(raw)
         val text = if (request != null) {
-            val reminder = reminders.add(request.title, request.timeMillis, request.repeat)
+            val reminder = reminders.add(
+                request.title, request.timeMillis, request.repeat,
+                alarm = request.alarm ?: reminders.alarmByDefault, leadMinutes = request.leadMinutes,
+            )
             onReminderCreated(reminder)
             clean + "\n" + ReminderParser.token(reminder.id)
         } else {

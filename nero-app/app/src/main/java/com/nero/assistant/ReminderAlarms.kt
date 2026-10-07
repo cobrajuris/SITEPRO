@@ -23,12 +23,15 @@ object ReminderAlarms {
     private const val EXTRA_SNOOZE = "snooze"
     private const val ACTION_DONE = "com.nero.assistant.LEMBRETE_FEITO"
     private const val ACTION_SNOOZE = "com.nero.assistant.LEMBRETE_ADIAR"
-    private const val SNOOZE_MINUTES = 10
+    const val SNOOZE_MINUTES = 10
     private const val SNOOZE_SALT = 0x5A5A5A5AL
 
     fun schedule(context: Context, reminder: Reminder) {
-        if (reminder.done || reminder.timeMillis <= System.currentTimeMillis()) return
-        setAlarm(context, reminder.timeMillis, alarmIntent(context, reminder.id, snooze = false))
+        val now = System.currentTimeMillis()
+        if (reminder.done || reminder.timeMillis <= now) return
+        // Com antecedência que já passou (ex.: criado 5 min antes com aviso de 15), toca no horário.
+        val at = if (reminder.alertAt > now) reminder.alertAt else reminder.timeMillis
+        setAlarm(context, at, alarmIntent(context, reminder.id, snooze = false))
     }
 
     fun cancel(context: Context, id: Long) {
@@ -80,12 +83,19 @@ object ReminderAlarms {
         }
     }
 
-    /** Chegou a hora: avisa e, se o lembrete se repete, já agenda a próxima vez. */
+    /** Toca de novo daqui a [SNOOZE_MINUTES] minutos. */
+    fun snooze(context: Context, id: Long) =
+        setAlarm(context, System.currentTimeMillis() + SNOOZE_MINUTES * 60_000L, alarmIntent(context, id, snooze = true))
+
+    /** Chegou a hora: toca o alarme (ou só avisa) e, se o lembrete se repete, já agenda a próxima vez. */
     internal fun fire(context: Context, id: Long, snooze: Boolean) {
         val store = ReminderStore(context)
         val reminder = store.get(id) ?: return
         if (reminder.done) return
-        notify(context, reminder)
+        // Adiado: mostra a hora de agora (nos que se repetem, o horário salvo já é o da próxima vez).
+        val shown = if (snooze) reminder.copy(timeMillis = System.currentTimeMillis(), leadMinutes = 0) else reminder
+        val rang = reminder.alarm && runCatching { AlarmService.start(context, shown, snooze) }.isSuccess
+        if (!rang) notify(context, reminder)
         if (!snooze && reminder.repeat != Repeat.NONE) {
             val next = Recurrence.next(reminder.timeMillis, reminder.repeat, System.currentTimeMillis()) ?: return
             val updated = reminder.copy(timeMillis = next)
@@ -106,12 +116,13 @@ object ReminderAlarms {
             }
             ACTION_SNOOZE -> {
                 context.getSystemService(NotificationManager::class.java).cancel(id.toInt())
-                setAlarm(context, System.currentTimeMillis() + SNOOZE_MINUTES * 60_000L, alarmIntent(context, id, snooze = true))
+                snooze(context, id)
             }
         }
     }
 
-    private fun notify(context: Context, reminder: Reminder) {
+    /** Notificação comum do lembrete (também usada quando o alarme toca e ninguém atende). */
+    internal fun notify(context: Context, reminder: Reminder, missed: Boolean = false) {
         ensureChannel(context)
         val id = reminder.id
         val open = PendingIntent.getActivity(
@@ -121,7 +132,12 @@ object ReminderAlarms {
                 .putExtra(MainActivity.EXTRA_OPEN_AGENDA, true),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        val text = if (reminder.repeat != Repeat.NONE) "Está na hora. ${reminder.repeat.label}." else "Está na hora."
+        val time = java.text.SimpleDateFormat("HH:mm", java.util.Locale("pt", "BR")).format(java.util.Date(reminder.timeMillis))
+        val text = when {
+            missed -> "Alarme não atendido · $time"
+            reminder.timeMillis - System.currentTimeMillis() > 60_000 -> "Às $time"
+            else -> "Está na hora."
+        } + if (reminder.repeat != Repeat.NONE) " · ${reminder.repeat.label}" else ""
         val notification = Notification.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("Nero lembra: ${reminder.title}")
