@@ -53,11 +53,18 @@ object ReminderAlarms {
         }
     }
 
-    /** Salva (cria ou edita) um lembrete e acerta o alarme. */
-    fun save(context: Context, store: ReminderStore, reminder: Reminder) {
+    /** Lembrete recém-criado (pelo chat ou pela agenda): liga o alarme e salva no calendário. */
+    fun created(context: Context, store: ReminderStore, reminder: Reminder): Reminder {
+        schedule(context, reminder)
+        return CalendarSync.upsert(context, store, reminder)
+    }
+
+    /** Salva um lembrete editado, acerta o alarme e atualiza o evento no calendário. */
+    fun save(context: Context, store: ReminderStore, reminder: Reminder): Reminder {
         store.update(reminder)
         cancel(context, reminder.id)
         schedule(context, reminder)
+        return CalendarSync.upsert(context, store, reminder)
     }
 
     /** Conclui o lembrete; os que se repetem passam para a próxima vez. */
@@ -66,8 +73,10 @@ object ReminderAlarms {
         return store.complete(id)?.also { schedule(context, it) }
     }
 
+    /** Apaga o lembrete, o alarme e o evento do calendário. */
     fun delete(context: Context, store: ReminderStore, id: Long) {
         cancel(context, id)
+        CalendarSync.delete(context, store.get(id)?.eventId)
         store.remove(id)
     }
 

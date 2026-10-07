@@ -212,9 +212,10 @@ class AgendaPage(
             addView(a.dots((format("HH:mm", time) + repeat + alert).uppercase(PT_BR), 11f, if (reminder.done) N.FAINT else N.LILAC))
         }, LinearLayout.LayoutParams(0, WRAP, 1f))
 
-        addView(a.roundButton(R.drawable.ic_event, "Adicionar à agenda do celular", size = 40) {
-            a.addToCalendar(reminder.title, time)
-        })
+        val inCalendar = reminder.eventId != null
+        addView(a.roundButton(R.drawable.ic_event, if (inCalendar) "Ver no calendário" else "Adicionar ao calendário", size = 40) {
+            a.openInCalendar(reminder, time)
+        }.apply { if (inCalendar) imageTintList = ColorStateList.valueOf(N.LILAC) })
     }
 
     private fun android.widget.ImageView.markChecked() {
@@ -288,7 +289,7 @@ class AgendaPage(
             set(Calendar.MILLISECOND, 0)
         }
         var repeat = existing?.repeat ?: Repeat.NONE
-        var alarm = existing?.alarm ?: store.alarmByDefault
+        var alarm = existing?.alarm ?: true
         var lead = existing?.leadMinutes ?: 0
 
         val box = panel().apply { setPadding(a.dp(20), a.dp(22), a.dp(20), a.dp(18)) }
@@ -385,7 +386,7 @@ class AgendaPage(
                     toast("Esse horário já passou. Escolha outro.")
                 else -> {
                     val saved = if (existing == null) {
-                        store.add(text, time.timeInMillis, repeat, alarm, lead).also { ReminderAlarms.schedule(a, it) }
+                        ReminderAlarms.created(a, store, store.add(text, time.timeInMillis, repeat, alarm, lead))
                     } else {
                         existing.copy(
                             title = text, timeMillis = time.timeInMillis, repeat = repeat, done = false,
@@ -393,7 +394,7 @@ class AgendaPage(
                         )
                             .also { ReminderAlarms.save(a, store, it) }
                     }
-                    a.askNotificationPermission()
+                    a.askReminderPermissions()
                     selected = startOfDay(saved.timeMillis)
                     month.timeInMillis = selected.timeInMillis
                     month.set(Calendar.DAY_OF_MONTH, 1)

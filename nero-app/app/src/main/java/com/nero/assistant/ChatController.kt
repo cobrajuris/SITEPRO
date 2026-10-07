@@ -21,7 +21,7 @@ class ChatController(
     private val store: ChatStore,
     val reminders: ReminderStore,
     private val isOnline: () -> Boolean = { true },
-    /** Chamado quando a IA cria um lembrete, para agendar o alarme. */
+    /** Chamado quando a IA cria um lembrete, para agendar o alarme e salvar no calendário. */
     private val onReminderCreated: (Reminder) -> Unit = {},
 ) {
 
@@ -178,7 +178,7 @@ class ChatController(
         cancelFlag.set(true)
         val partial = streamingText
         streamingText = null
-        if (!partial.isNullOrBlank()) commitReply(ReminderParser.hidePartial(partial))
+        if (!partial.isNullOrBlank()) commitReply(partial)
         onChange()
     }
 
@@ -239,17 +239,18 @@ class ChatController(
     }
 
     private fun commitReply(raw: String) {
-        // Se a IA pediu um lembrete, cria e agenda, e deixa uma marca no texto para a tela mostrar o cartão.
-        val (clean, request) = ReminderParser.extract(raw)
-        val text = if (request != null) {
-            val reminder = reminders.add(
-                request.title, request.timeMillis, request.repeat,
-                alarm = request.alarm ?: reminders.alarmByDefault, leadMinutes = request.leadMinutes,
-            )
-            onReminderCreated(reminder)
-            clean + "\n" + ReminderParser.token(reminder.id)
+        // Cada compromisso pedido vira um lembrete com alarme (e vai para o calendário pela tela);
+        // o texto guarda uma marca por lembrete para a tela mostrar os cartões.
+        val (full, requests) = ReminderParser.extractAll(raw)
+        val clean = ReminderParser.hidePartial(full)
+        val text = if (requests.isNotEmpty()) {
+            val created = requests.map { request ->
+                reminders.add(request.title, request.timeMillis, request.repeat, alarm = true, leadMinutes = request.leadMinutes)
+                    .also(onReminderCreated)
+            }
+            clean + "\n" + created.joinToString("") { ReminderParser.token(it.id) }
         } else {
-            ReminderParser.hidePartial(clean)
+            clean
         }
         current = current.copy(
             turns = current.turns + ChatTurn(Role.ASSISTANT, text),

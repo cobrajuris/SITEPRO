@@ -44,16 +44,23 @@ data class Reminder(
     val alarm: Boolean = true,
     /** Quantos minutos antes do horário o aviso dispara. */
     val leadMinutes: Int = 0,
+    /** Evento correspondente no calendário do celular (null se não foi salvo lá). */
+    val eventId: Long? = null,
 ) {
     /** Quando o aviso deve tocar (o horário menos a antecedência). */
     val alertAt get() = timeMillis - leadMinutes * 60_000L
 }
 
 /** Opções de antecedência oferecidas no editor. */
-val LEAD_OPTIONS = listOf(0, 5, 15, 30, 60)
+val LEAD_OPTIONS = listOf(0, 5, 15, 30, 60, 120, 1440)
+
+/** Maior antecedência aceita: uma semana. */
+const val MAX_LEAD_MINUTES = 7 * 24 * 60
 
 fun leadLabel(minutes: Int) = when {
     minutes <= 0 -> "Na hora"
+    minutes == 1440 -> "1 dia antes"
+    minutes % 1440 == 0 -> "${minutes / 1440} dias antes"
     minutes % 60 == 0 -> "${minutes / 60} h antes"
     else -> "$minutes min antes"
 }
@@ -105,12 +112,12 @@ object Recurrence {
 }
 
 /** Banco SQLite dos lembretes (só usa o que já vem no Android). */
-private class ReminderDb(context: Context) : SQLiteOpenHelper(context, "nero.db", null, 2) {
+private class ReminderDb(context: Context) : SQLiteOpenHelper(context, "nero.db", null, 3) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             "CREATE TABLE reminders (id INTEGER PRIMARY KEY, title TEXT NOT NULL, time INTEGER NOT NULL, " +
                 "repeat TEXT NOT NULL DEFAULT '', done INTEGER NOT NULL DEFAULT 0, " +
-                "alarm INTEGER NOT NULL DEFAULT 1, lead INTEGER NOT NULL DEFAULT 0)"
+                "alarm INTEGER NOT NULL DEFAULT 1, lead INTEGER NOT NULL DEFAULT 0, event_id INTEGER)"
         )
         db.execSQL("CREATE INDEX reminders_time ON reminders(time)")
     }
@@ -121,6 +128,8 @@ private class ReminderDb(context: Context) : SQLiteOpenHelper(context, "nero.db"
             db.execSQL("ALTER TABLE reminders ADD COLUMN alarm INTEGER NOT NULL DEFAULT 1")
             db.execSQL("ALTER TABLE reminders ADD COLUMN lead INTEGER NOT NULL DEFAULT 0")
         }
+        // Versão 3 (Nero 1.8): ligação com o evento salvo no calendário do celular.
+        if (oldVersion < 3) db.execSQL("ALTER TABLE reminders ADD COLUMN event_id INTEGER")
     }
 }
 
@@ -130,10 +139,10 @@ class ReminderStore(context: Context) {
     private val db = ReminderDb(context.applicationContext)
     private val settings = context.getSharedPreferences("nero_alarm", Context.MODE_PRIVATE)
 
-    /** Lembretes novos já vêm com o alarme ligado? */
-    var alarmByDefault: Boolean
-        get() = settings.getBoolean("alarm_default", true)
-        set(value) = settings.edit().putBoolean("alarm_default", value).apply()
+    /** Salvar os compromissos no calendário do celular automaticamente? */
+    var calendarSync: Boolean
+        get() = settings.getBoolean("calendar_sync", true)
+        set(value) = settings.edit().putBoolean("calendar_sync", value).apply()
 
     /** Som escolhido para o alarme (vazio = o alarme padrão do celular). */
     var alarmSound: String
@@ -176,13 +185,16 @@ class ReminderStore(context: Context) {
         title: String,
         timeMillis: Long,
         repeat: Repeat = Repeat.NONE,
-        alarm: Boolean = alarmByDefault,
+        alarm: Boolean = true,
         leadMinutes: Int = 0,
     ): Reminder {
         val last = db.readableDatabase.rawQuery("SELECT MAX(id) FROM $TABLE", null).use { c ->
             if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else 0L
         }
-        val reminder = Reminder(maxOf(System.currentTimeMillis(), last + 1), title.trim(), timeMillis, repeat, false, alarm, leadMinutes.coerceAtLeast(0))
+        val reminder = Reminder(
+            maxOf(System.currentTimeMillis(), last + 1), title.trim(), timeMillis, repeat, false, alarm,
+            leadMinutes.coerceIn(0, MAX_LEAD_MINUTES),
+        )
         db.writableDatabase.insert(TABLE, null, values(reminder))
         return reminder
     }
@@ -223,6 +235,7 @@ class ReminderStore(context: Context) {
                     done = c.getInt(c.getColumnIndexOrThrow("done")) != 0,
                     alarm = c.getInt(c.getColumnIndexOrThrow("alarm")) != 0,
                     leadMinutes = c.getInt(c.getColumnIndexOrThrow("lead")),
+                    eventId = c.getColumnIndexOrThrow("event_id").let { i -> if (c.isNull(i)) null else c.getLong(i) },
                 )
             }
             list
@@ -236,6 +249,7 @@ class ReminderStore(context: Context) {
         put("done", if (r.done) 1 else 0)
         put("alarm", if (r.alarm) 1 else 0)
         put("lead", r.leadMinutes)
+        if (r.eventId != null) put("event_id", r.eventId) else putNull("event_id")
     }
 
     private companion object {
@@ -258,26 +272,35 @@ object ReminderParser {
         val title: String,
         val timeMillis: Long,
         val repeat: Repeat = Repeat.NONE,
-        /** null: segue o padrão dos Ajustes. */
-        val alarm: Boolean? = null,
         val leadMinutes: Int = 0,
     )
 
-    /** Devolve o texto sem o bloco e o pedido de lembrete encontrado (se for válido). */
-    fun extract(text: String, timeZone: TimeZone = TimeZone.getDefault()): Pair<String, Request?> {
-        val match = BLOCK.find(text) ?: return text to null
-        val clean = text.removeRange(match.range).trimEnd()
-        val request = runCatching {
-            val json = JSONObject(match.groupValues[1])
-            val title = json.getString("titulo").trim()
-            val time = parseTime(json.getString("quando"), timeZone)
-            val repeat = Repeat.from(json.optString("repetir"))
-            val alarm = if (json.has("alarme")) json.optBoolean("alarme", true) else null
-            val lead = json.optInt("antes", 0).coerceIn(0, 24 * 60)
-            if (title.isEmpty() || time == null) null else Request(title, time, repeat, alarm, lead)
-        }.getOrNull()
-        return clean to request
+    /** Devolve o texto sem o bloco e o primeiro pedido de lembrete válido. */
+    fun extract(text: String, timeZone: TimeZone = TimeZone.getDefault()): Pair<String, Request?> =
+        extractAll(text, timeZone).let { (clean, list) -> clean to list.firstOrNull() }
+
+    /**
+     * Devolve o texto sem os blocos e todos os pedidos de lembrete válidos
+     * (uma foto pode ter vários compromissos).
+     */
+    fun extractAll(text: String, timeZone: TimeZone = TimeZone.getDefault()): Pair<String, List<Request>> {
+        val matches = BLOCK.findAll(text).toList()
+        if (matches.isEmpty()) return text to emptyList()
+        var clean = text
+        matches.asReversed().forEach { clean = clean.removeRange(it.range) }
+        clean = clean.replace(Regex("\n{3,}"), "\n\n").trimEnd()
+        val requests = matches.mapNotNull { m -> parseRequest(m.groupValues[1], timeZone) }
+        return clean to requests
     }
+
+    private fun parseRequest(raw: String, timeZone: TimeZone): Request? = runCatching {
+        val json = JSONObject(raw)
+        val title = json.getString("titulo").trim()
+        val time = parseTime(json.getString("quando"), timeZone)
+        val repeat = Repeat.from(json.optString("repetir"))
+        val lead = json.optInt("antes", 0).coerceIn(0, MAX_LEAD_MINUTES)
+        if (title.isEmpty() || time == null) null else Request(title, time, repeat, lead)
+    }.getOrNull()
 
     /** Marca no texto salvo qual lembrete foi criado, para a tela mostrar o cartão. */
     fun token(id: Long) = "[[lembrete:$id]]"
@@ -286,8 +309,9 @@ object ReminderParser {
 
     fun stripTokens(text: String) = text.replace(TOKEN, "").trimEnd()
 
-    /** Esconde um bloco ainda incompleto enquanto a resposta chega em streaming. */
-    fun hidePartial(text: String): String {
+    /** Esconde os blocos (prontos ou ainda incompletos) enquanto a resposta chega em streaming. */
+    fun hidePartial(raw: String): String {
+        val text = raw.replace(BLOCK, "").trimEnd()
         val start = text.lastIndexOf("[[")
         if (start < 0) return text
         val tail = text.substring(start)
@@ -327,17 +351,25 @@ object ReminderParser {
                 }
         return """
             Agora é ${format.format(now)} (fuso ${timeZone.id}).
-            Você pode criar lembretes no aparelho do usuário. Quando ele pedir para lembrar, agendar,
-            marcar ou anotar algo com data ou horário (inclusive se a informação vier de uma imagem),
-            responda normalmente confirmando e termine a resposta com exatamente uma linha:
-            [[LEMBRETE {"titulo": "texto curto do lembrete", "quando": "AAAA-MM-DDTHH:MM"}]]
+            Você cria compromissos no aparelho do usuário. Cada compromisso criado toca o alarme do Nero
+            no horário e é salvo no calendário do celular automaticamente.
+            SEMPRE que ele marcar, agendar, pedir para lembrar ou anotar qualquer coisa com data ou horário
+            (por texto, voz ou imagem: convite, consulta, conta, print de conversa, cartaz, receita),
+            confirme em uma frase curta e termine a resposta com uma linha por compromisso:
+            [[LEMBRETE {"titulo": "texto curto do compromisso", "quando": "AAAA-MM-DDTHH:MM"}]]
+            Se a imagem ou o pedido tiver vários compromissos, escreva uma linha para cada um.
             Se ele pedir algo que se repete, acrescente "repetir" com "diario", "semanal" ou "mensal", por exemplo:
             [[LEMBRETE {"titulo": "Tomar remédio", "quando": "2026-10-08T08:00", "repetir": "diario"}]]
-            Se ele pedir para ser avisado antes, acrescente "antes" com os minutos de antecedência
-            (ex.: "antes": 30). O Nero toca um alarme com som; se ele pedir só uma notificação, sem
-            alarme, acrescente "alarme": false.
+            Se ele pedir para ser avisado antes ("me avisa 1 hora antes", "um dia antes"), acrescente "antes"
+            com os minutos de antecedência: o alarme toca nesse momento. Exemplo, consulta às 15h com aviso
+            1 hora antes:
+            [[LEMBRETE {"titulo": "Consulta", "quando": "2026-10-08T15:00", "antes": 60}]]
+            Se ele disser o horário do aviso ("me avisa às 14h" para algo às 15h), calcule a diferença em
+            minutos e use em "antes". O máximo é 10080 (uma semana). Sem pedido de aviso antes, não use "antes".
+            Em "quando" vai sempre o horário do compromisso, nunca o do aviso.
             Use horário local de 24h. Se faltar o horário, use 09:00. Se faltar a data, pergunte antes
-            e não escreva a linha. Nunca escreva essa linha em outras situações.
+            e não escreva a linha. Não peça confirmação quando data e hora estiverem claras.
+            Nunca escreva essa linha em outras situações.
             Se o novo lembrete cair no mesmo horário de outro já existente, avise o usuário.
             $upcoming
         """.trimIndent()

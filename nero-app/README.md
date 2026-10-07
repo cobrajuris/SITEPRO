@@ -17,6 +17,9 @@ App Android nativo (Kotlin, componentes nativos do Android) com a identidade do 
 - **Alarme próprio** (versão 1.7): na hora do compromisso (ou 5/15/30/60 min antes) o Nero toca som de
   alarme subindo aos poucos, vibra e acende a tela por cima do bloqueio com **Concluído** e **Adiar 10 min**;
   som escolhível e botão de teste em Ajustes; cada lembrete pode ser alarme ou só notificação
+- **Tudo que você marcar vira alarme + calendário** (versão 1.8): por texto, voz ou foto (inclusive
+  vários compromissos numa mesma imagem), o Nero sempre liga o alarme dele e salva o evento direto no
+  calendário do celular; "me avisa 1 hora antes" faz o alarme tocar 1 hora antes (até 1 semana)
 - O Nero conhece seus próximos lembretes e responde perguntas como "o que tenho amanhã?"
 - Chave conferida no OpenRouter antes de salvar e guardada criptografada (Android Keystore)
 - Histórico de conversas salvo no aparelho, com menu lateral
